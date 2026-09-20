@@ -231,6 +231,71 @@ test("parses fragmented and multi-line SSE messages", () => {
   assert.equal(parsed[0].data.choices[0].delta.content, "x");
   assert.equal(parsed[1].data, "[DONE]");
 });
+
+test("preserves multi-byte UTF-8 split across SSE chunk boundaries", () => {
+  // 上游的 SSE chunk 边界与 UTF-8 字符边界无关。用 Buffer#toString()
+  // 逐个 chunk 解码会把跨包的中文字符切成 U+FFFD。
+  const expected = "中文测试-流式输出";
+  const raw = Buffer.from(
+    'data: {"object":"chat.completion.chunk","choices":[{"delta":{"content":"' +
+      expected +
+      '"}}]}\n\n',
+    "utf8",
+  );
+
+  for (let cut = 1; cut < raw.length; cut += 1) {
+    const parsed = [];
+    const parser = createSseParser((item) => parsed.push(item));
+    parser.push(raw.subarray(0, cut));
+    parser.push(raw.subarray(cut));
+    parser.end();
+
+    assert.equal(parsed.length, 1, "cut=" + cut + " should yield one event");
+    assert.equal(
+      parsed[0].data.choices[0].delta.content,
+      expected,
+      "cut=" + cut + " corrupted the streamed text",
+    );
+  }
+});
+
+test("stream translator emits a cancelled terminal event", () => {
+  const translator = createResponseStreamTranslator({
+    model: "mimo-x-pro-preview",
+    input: "hello",
+    stream: true,
+  });
+
+  translator.start();
+  translator.push({
+    object: "chat.completion.chunk",
+    choices: [{ delta: { content: "partial" } }],
+  });
+
+  const cancelled = eventPayloads(translator.cancel());
+  assert.equal(cancelled.length, 1);
+  assert.equal(cancelled[0].type, "response.cancelled");
+  assert.equal(cancelled[0].response.status, "cancelled");
+  assert.deepEqual(cancelled[0].response.incomplete_details, {
+    reason: "cancelled",
+  });
+  // 取消必须保留已产出的部分输出，便于客户端留存。
+  assert.equal(cancelled[0].response.output[0].content[0].text, "partial");
+});
+
+test("stream translator exposes the in-flight response for registration", () => {
+  const translator = createResponseStreamTranslator({
+    model: "mimo-x-pro-preview",
+    input: "hello",
+    stream: true,
+  });
+
+  const created = eventPayloads(translator.start());
+  const live = translator.currentResponse();
+  assert.ok(live.id, "translator must expose a response id before completion");
+  assert.equal(created[0].response.id, live.id);
+  assert.equal(live.status, "in_progress");
+});
 test("supports stateful Responses context, item_reference and structured output", () => {
   const previous = {
     id: "resp_previous",
@@ -395,6 +460,23 @@ test("creates background response objects with protocol metadata", () => {
   assert.equal(queued.background, true);
   assert.deepEqual(queued.metadata, { job: "one" });
   assert.deepEqual(queued.output, []);
+});
+
+test("rejects requests that would produce an empty message list", () => {
+  assert.throws(
+    () => toChatRequest({ model: "mimo-x-pro-preview", input: [] }),
+    /input is empty/,
+  );
+  assert.throws(
+    () => toChatRequest({ model: "mimo-x-pro-preview", input: null }),
+    /input is empty/,
+  );
+  // 仅有 instructions 时合法。
+  const chat = toChatRequest({
+    model: "mimo-x-pro-preview",
+    instructions: "Be concise",
+  });
+  assert.equal(chat.messages[0].role, "system");
 });
 
 test("rejects unsupported hosted prompt and tool types explicitly", () => {

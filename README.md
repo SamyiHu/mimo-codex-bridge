@@ -11,7 +11,7 @@ Codex ── bridge-secret ──▶ mimo-bridge (127.0.0.1:8788)
                               └─ MiMo token ──▶ MiMo Desktop Engine
 ```
 
-当前版本：**2.2.0**。项目仅监听 `127.0.0.1`，不依赖第三方 npm 包。MiMo Desktop 的内部接口不是稳定公开接口，客户端升级后可能需要再次适配。
+当前版本：**2.3.0**。项目仅监听 `127.0.0.1`，不依赖第三方 npm 包。MiMo Desktop 的内部接口不是稳定公开接口，客户端升级后可能需要再次适配。
 
 ## 两套凭据
 
@@ -73,6 +73,16 @@ powershell -File .\mimo-bridge.ps1 native-probe
 ```
 
 探测报告写入 `reports\mimo-native-responses.json`。
+
+## 2.3 可靠性修复
+
+- 修复流式输出中的中文乱码：SSE 解码改用 `StringDecoder`，UTF-8 字符不再被 chunk 边界切断。
+- 修复「取消响应」只改状态不中断上游的问题：取消现在会真正断开上游连接，不再白跑完整个请求。
+- 修复后台响应绕过并发上限的问题：`background` 请求现在同样受 `MIMO_BRIDGE_MAX_CONCURRENT` 约束。
+- 修复并发额度把控制面一起挡掉的问题：取消、查询、删除、`/status`、`/metrics` 不再受数据面额度限制。
+- 端口发现改为异步子进程：重新发现引擎时不再阻塞事件循环，在飞的流式响应不再出现约 260ms 的卡顿。
+- 新增 Host 头校验，默认只接受 loopback 请求，缓解 DNS rebinding。
+- bridge secret 比较改为常量时间比较。
 
 ## 前置条件
 
@@ -326,8 +336,10 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 | `MIMO_BRIDGE_BREAKER_COOLDOWN_MS` | `5000` | 熔断冷却时间 |
 | `MIMO_BRIDGE_RESPONSE_TTL_MS` | `1800000` | Responses 状态保留时间 |
 | `MIMO_BRIDGE_RESPONSE_STATE_MAX` | `200` | 内存中最多保存的 Responses 数量 |
+| `MIMO_BRIDGE_ALLOWED_HOSTS` | 空 | 额外允许的 `Host` 头，逗号分隔 |
+| `MIMO_BRIDGE_ALLOW_ANY_HOST` | `0` | 设为 `1` 关闭 Host 校验（不推荐） |
 | `BRIDGE_DEBUG` | `0` | 写入脱敏请求元数据 |
-| `BRIDGE_DEBUG_INCLUDE_BODY` | `0` | 显式开启后才记录完整请求体 |
+| `BRIDGE_DEBUG_INCLUDE_BODY` | `0` | 显式开启后才记录请求体 |
 
 ## 使用 cc-switch（可选）
 
@@ -364,6 +376,7 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 - 上游没有返回 usage 时，指标和 Codex 可能显示 `tokens used 0`。
 - 多模态内容会尽可能保留并交给上游，实际支持情况取决于 MiMo 模型版本。
 - 不要把 bridge 监听地址改成 `0.0.0.0`，否则本地凭据和模型请求会暴露到网络。
+- bridge 默认校验 `Host` 头，只接受 `127.0.0.1` / `localhost` / `[::1]`。若经反向代理访问，请用 `MIMO_BRIDGE_ALLOWED_HOSTS` 放行对应 Host。
 
 ## 免责声明
 

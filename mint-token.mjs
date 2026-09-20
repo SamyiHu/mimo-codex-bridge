@@ -43,16 +43,26 @@ fs.mkdirSync(bridgeDir, { recursive: true });
 fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
 fs.mkdirSync(path.dirname(bridgeSecretFile), { recursive: true });
 
+/**
+ * 域账户下 os.userInfo().username 只返回 "jdoe" 而不含域名，
+ * icacls 会因找不到账号而失败。优先用 whoami 的完整身份。
+ */
+function currentWindowsAccount() {
+  const domain = process.env.USERDOMAIN;
+  const user = process.env.USERNAME || os.userInfo().username;
+  if (domain && user && !user.includes("\\")) return `${domain}\\ ${user}`;
+  return user;
+}
+
 function secureCredentialFile(file) {
   try {
     fs.chmodSync(file, 0o600);
   } catch {}
   if (process.platform === "win32") {
     try {
-      const user = os.userInfo().username;
       execFileSync(
         "icacls",
-        [file, "/inheritance:r", "/grant:r", `${user}:F`],
+        [file, "/inheritance:r", "/grant:r", `${currentWindowsAccount()}:F`],
         { stdio: "ignore" },
       );
     } catch (error) {

@@ -77,10 +77,20 @@ export class MetricsRegistry {
     });
   }
 
-  tryBegin() {
+  /**
+   * 申请一个并发额度。
+   * countTotal=false 用于后台任务：它复用同一次 API 调用的额度，
+   * 只应计入 active（真实在飞的上游请求），不应再算一次 requests.total。
+   */
+  /** 只计入请求总数，不占用并发额度。 */
+  countRequest() {
+    this.total += 1;
+  }
+
+  tryBegin({ countTotal = true } = {}) {
     if (this.active >= this.maxConcurrent) return null;
     this.active += 1;
-    this.total += 1;
+    if (countTotal) this.total += 1;
     return { startedAt: Date.now(), model: null };
   }
 

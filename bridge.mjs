@@ -12,7 +12,9 @@ import http from "node:http";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   CircuitBreaker,
   MetricsRegistry,
@@ -94,6 +96,34 @@ const RESPONSE_STATE_MAX = intFrom(
   200,
 );
 const DEBUG = process.env.BRIDGE_DEBUG === "1";
+
+const BRIDGE_VERSION = (() => {
+  try {
+    return JSON.parse(
+      fs.readFileSync(path.join(import.meta.dirname, "package.json"), "utf8"),
+    ).version;
+  } catch {
+    return "unknown";
+  }
+})();
+
+// 只绑 127.0.0.1 并不能挡住 DNS rebinding：恶意页面可以让自己的域名解析到
+// 127.0.0.1，再由浏览器带上 Host: evil.example 打到本服务。这里显式校验 Host。
+const ALLOW_ANY_HOST = process.env.MIMO_BRIDGE_ALLOW_ANY_HOST === "1";
+const ALLOWED_HOSTS = new Set(
+  (process.env.MIMO_BRIDGE_ALLOWED_HOSTS || "")
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean)
+    .concat([
+      `127.0.0.1:${LISTEN_PORT}`,
+      `localhost:${LISTEN_PORT}`,
+      `[::1]:${LISTEN_PORT}`,
+      "127.0.0.1",
+      "localhost",
+      "[::1]",
+    ]),
+);
 const DEBUG_INCLUDE_BODY = process.env.BRIDGE_DEBUG_INCLUDE_BODY === "1";
 const DEBUG_FILE = path.join(import.meta.dirname, "debug-requests.jsonl");
 
@@ -192,23 +222,44 @@ function parseTasklist(text) {
  * 只返回明确属于 MiMo 桌面进程的端口。
  * 不再扫描或请求其他本地监听端口，避免向无关进程发送 bearer token。
  */
+const execFileAsync = promisify(execFile);
+const PROCESS_SCAN_OPTIONS = {
+  encoding: "utf8",
+  maxBuffer: 10 * 1024 * 1024,
+  windowsHide: true,
+};
+const PROCESS_PID_CACHE_MS = 5000;
+let mimoPidCache = { at: 0, pids: new Set() };
+
+/** MiMo 桌面进程的 PID 集合在进程存活期间不变，短 TTL 缓存足以省掉一次 tasklist。 */
+async function mimoProcessPids() {
+  if (Date.now() - mimoPidCache.at < PROCESS_PID_CACHE_MS) {
+    return mimoPidCache.pids;
+  }
+  const tasklist = await execFileAsync(
+    "tasklist",
+    ["/FO", "CSV", "/NH"],
+    PROCESS_SCAN_OPTIONS,
+  );
+  const pids = parseTasklist(tasklist.stdout);
+  mimoPidCache = { at: Date.now(), pids };
+  return pids;
+}
+
 async function candidatePorts() {
   if (ENGINE_URL) return [];
 
   try {
-    const netstat = execFileSync("netstat", ["-ano", "-p", "TCP"], {
-      encoding: "utf8",
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    const tasklist = execFileSync("tasklist", ["/FO", "CSV", "/NH"], {
-      encoding: "utf8",
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    const mimoPids = parseTasklist(tasklist);
+    // 两个子进程并行跑，且都不阻塞事件循环：重试路径会强制重新发现引擎，
+    // 同步 execFileSync 会让这段时间内所有在飞的 SSE 流一起卡住。
+    const [netstat, mimoPids] = await Promise.all([
+      execFileAsync("netstat", ["-ano", "-p", "TCP"], PROCESS_SCAN_OPTIONS),
+      mimoProcessPids(),
+    ]);
     if (!mimoPids.size) return [];
 
     const ports = new Set();
-    for (const line of netstat.split(/\r?\n/)) {
+    for (const line of netstat.stdout.split(/\r?\n/)) {
       if (!/LISTENING/i.test(line)) continue;
       const columns = line.trim().split(/\s+/);
       if (columns.length < 5) continue;
@@ -310,24 +361,47 @@ function upstreamUrl(base, requestPath, keepQuery = true) {
   return url;
 }
 
-function createAbortContext(externalSignal, timeoutMs = UPSTREAM_TIMEOUT_MS) {
+function createAbortContext(externalSignals, timeoutMs = UPSTREAM_TIMEOUT_MS) {
+  const signals = (
+    Array.isArray(externalSignals) ? externalSignals : [externalSignals]
+  ).filter(Boolean);
+
   const controller = new AbortController();
-  const abortFromClient = () => {
-    controller.abort(externalSignal?.reason ?? new Error("client disconnected"));
+  const listeners = [];
+  let cause = null;
+
+  const abortWith = (reason) => {
+    if (controller.signal.aborted) return;
+    cause = reason;
+    controller.abort(reason);
   };
 
-  if (externalSignal?.aborted) abortFromClient();
-  else externalSignal?.addEventListener("abort", abortFromClient, { once: true });
+  for (const signal of signals) {
+    if (signal.aborted) {
+      abortWith(signal.reason ?? new Error("request aborted"));
+      continue;
+    }
+    const listener = () =>
+      abortWith(signal.reason ?? new Error("request aborted"));
+    signal.addEventListener("abort", listener, { once: true });
+    listeners.push([signal, listener]);
+  }
 
   const timer = setTimeout(() => {
-    controller.abort(new Error(`upstream timeout after ${timeoutMs}ms`));
+    abortWith(new Error(`upstream timeout after ${timeoutMs}ms`));
   }, timeoutMs);
 
   return {
     signal: controller.signal,
+    get cause() {
+      return cause;
+    },
     dispose() {
       clearTimeout(timer);
-      externalSignal?.removeEventListener("abort", abortFromClient);
+      for (const [signal, listener] of listeners) {
+        signal.removeEventListener("abort", listener);
+      }
+      listeners.length = 0;
     },
   };
 }
@@ -363,12 +437,25 @@ function sendError(res, status, message, requestId, type = "bridge_error") {
   sendJson(res, status, { error: { message, type } }, requestId);
 }
 
+/**
+ * 先哈希再比较：既避免 === 的提前返回带来计时侧信道，
+ * 也避免因长度不同而泄露 secret 长度。
+ */
+function secretEquals(candidate, expected) {
+  if (typeof candidate !== "string" || !candidate) return false;
+  const left = crypto.createHash("sha256").update(candidate).digest();
+  const right = crypto.createHash("sha256").update(expected).digest();
+  return crypto.timingSafeEqual(left, right);
+}
+
 function isBridgeAuthorized(request) {
   const authorization = request.headers.authorization || "";
-  const apiKey = request.headers["x-api-key"];
+  const bearer = authorization.startsWith("Bearer ")
+    ? authorization.slice(7)
+    : "";
   return (
-    authorization === `Bearer ${BRIDGE_SECRET}` ||
-    (typeof apiKey === "string" && apiKey === BRIDGE_SECRET)
+    secretEquals(bearer, BRIDGE_SECRET) ||
+    secretEquals(request.headers["x-api-key"], BRIDGE_SECRET)
   );
 }
 
@@ -448,6 +535,7 @@ async function proxyResponsesStream({
   chatBody,
   requestId,
   abortContext,
+  cancellation,
   metricState,
 }) {
   const contentType = upstream.headers.get("content-type") || "";
@@ -483,6 +571,10 @@ async function proxyResponsesStream({
 
   const translator = createResponseStreamTranslator(requestBody);
   for (const evt of translator.start()) await sseWrite(res, evt);
+
+  // 响应 ID 在 response.created 里已经交给客户端，此时就可以登记，
+  // 让 POST /v1/responses/{id}/cancel 有事可做。
+  rememberResponse(translator.currentResponse(), cancellation);
 
   const parsedChunks = [];
   const parser = createSseParser((parsed) => {
@@ -555,7 +647,20 @@ async function proxyResponsesStream({
       requestId,
       path: req.url,
       streamError: String(error?.message ?? error),
+      abortCause: String(abortContext.cause?.message ?? abortContext.cause ?? ""),
     });
+
+    // 主动取消不是故障：不发 response.failed，也不记熔断失败。
+    if (cancellation.signal.aborted) {
+      if (!res.writableEnded) {
+        try {
+          for (const evt of translator.cancel()) await sseWrite(res, evt);
+        } catch {}
+        res.end();
+      }
+      return;
+    }
+
     if (!abortContext.signal.aborted && !res.destroyed) {
       metrics.observeError("stream_interrupted");
       metrics.breaker.recordFailure();
@@ -661,7 +766,7 @@ async function handleApiRequest(req, res, metricState = null) {
       {
         ok: !!base,
         pid: process.pid,
-        version: "2.2.0",
+        version: BRIDGE_VERSION,
         node: process.version,
         platform: process.platform,
         engine: base,
@@ -853,7 +958,13 @@ async function handleApiRequest(req, res, metricState = null) {
     }
 
     if (body.background === true) {
-      const queued = rememberResponse(createQueuedResponse(body));
+      // 控制器必须先建并登记，否则 cancel 端点拿不到可中断的东西，
+      // 上游请求会一直跑到自然结束。
+      const backgroundCancellation = new AbortController();
+      const queued = rememberResponse(
+        createQueuedResponse(body),
+        backgroundCancellation,
+      );
       body.__queuedId = queued.id;
       chatBody.stream = false;
       setImmediate(() => {
@@ -872,7 +983,13 @@ async function handleApiRequest(req, res, metricState = null) {
     if (!res.writableEnded) clientAbort.abort(new Error("client disconnected"));
   });
 
-  let abortContext = createAbortContext(clientAbort.signal);
+  // 响应级取消与客户端断开是两件事：前者要发 cancelled 终态，
+  // 后者只是连接没了。两者都应立刻中断上游请求。
+  const cancellation = new AbortController();
+  let abortContext = createAbortContext([
+    clientAbort.signal,
+    cancellation.signal,
+  ]);
   let upstreamPath = requestPath;
   if (isResponses) upstreamPath = "/v1/chat/completions";
 
@@ -925,7 +1042,10 @@ async function handleApiRequest(req, res, metricState = null) {
             if (attempt === 0) {
               metrics.observeRetry();
               abortContext.dispose();
-              abortContext = createAbortContext(clientAbort.signal);
+              abortContext = createAbortContext([
+                clientAbort.signal,
+                cancellation.signal,
+              ]);
               continue;
             }
           }
@@ -942,6 +1062,7 @@ async function handleApiRequest(req, res, metricState = null) {
             chatBody,
             requestId,
             abortContext,
+            cancellation,
             metricState,
           });
         } else {
@@ -980,7 +1101,10 @@ async function handleApiRequest(req, res, metricState = null) {
             if (attempt === 0) {
               metrics.observeRetry();
               abortContext.dispose();
-              abortContext = createAbortContext(clientAbort.signal);
+              abortContext = createAbortContext([
+                clientAbort.signal,
+                cancellation.signal,
+              ]);
               continue;
             }
           }
@@ -1082,8 +1206,8 @@ function normalizeStructuredResponse(response, requestBody) {
   return response;
 }
 
-function rememberResponse(response) {
-  if (response?.id) responseStore.put(response.id, response);
+function rememberResponse(response, controller = null) {
+  if (response?.id) responseStore.put(response.id, response, controller);
   return response;
 }
 
@@ -1095,6 +1219,23 @@ async function runBackgroundResponse(body, chatBody, requestId) {
   responseStore.patch(queuedId, { status: "in_progress", error: null });
   const abortContext = createAbortContext(record.controller?.signal);
 
+  // HTTP 响应早已返回，metrics 里对应的额度已经释放；这里必须重新申请，
+  // 否则 max_concurrent_requests 对 background 请求完全不起作用。
+  const slot = metrics.tryBegin({ countTotal: false });
+  if (!slot) {
+    responseStore.patch(queuedId, {
+      status: "failed",
+      error: {
+        code: "concurrency_limit",
+        message: `bridge concurrency limit reached (${MAX_CONCURRENT_REQUESTS})`,
+      },
+    });
+    metrics.observeError("background_concurrency_limit");
+    return;
+  }
+  metrics.setModel(slot, chatBody.model);
+
+  let outcomeStatus = 200;
   try {
     const base = await discoverEngine();
     if (!base) {
@@ -1125,7 +1266,10 @@ async function runBackgroundResponse(body, chatBody, requestId) {
     if (!payload) throw new Error("upstream returned invalid JSON");
 
     const currentAfterFetch = responseStore.get(queuedId);
-    if (currentAfterFetch?.status === "cancelled") return;
+    if (currentAfterFetch?.status === "cancelled") {
+      outcomeStatus = 499;
+      return;
+    }
 
     const response = normalizeStructuredResponse(
       toResponseObject(payload, body),
@@ -1137,7 +1281,14 @@ async function runBackgroundResponse(body, chatBody, requestId) {
     metrics.observeUsage(response.usage);
   } catch (error) {
     const current = responseStore.get(queuedId);
-    if (current?.status === "cancelled") return;
+    if (current?.status === "cancelled") {
+      outcomeStatus = 499;
+      return;
+    }
+    const statusCode = Number(error?.statusCode);
+    outcomeStatus = Number.isInteger(statusCode) && statusCode >= 400
+      ? statusCode
+      : 500;
     responseStore.patch(queuedId, {
       status: "failed",
       error: {
@@ -1148,17 +1299,43 @@ async function runBackgroundResponse(body, chatBody, requestId) {
     metrics.observeError("background_response_failed");
   } finally {
     abortContext.dispose();
+    metrics.finish(slot, outcomeStatus);
   }
 }
 
 const server = http.createServer((req, res) => {
   const requestUrl = new URL(req.url || "/", "http://bridge.local");
-  const operational = requestUrl.pathname.startsWith("/v1/");
+  const requestPath = requestUrl.pathname;
+  const operational = requestPath.startsWith("/v1/");
+
+  if (
+    !ALLOW_ANY_HOST &&
+    !ALLOWED_HOSTS.has(String(req.headers.host || "").toLowerCase())
+  ) {
+    sendError(
+      res,
+      403,
+      "forbidden host header; this bridge only accepts loopback requests",
+      undefined,
+      "forbidden_host",
+    );
+    return;
+  }
+
   let metricState = null;
 
-  if (operational) {
-    metricState = metrics.tryBegin();
+  if (operational) metrics.countRequest();
+
+  // 并发额度只配额给真正会占用上游的端点。取消、查询、删除都只动本地状态：
+  // 一旦数据面被打满，这些控制面接口必须仍然可用，否则连取消都发不出去。
+  const consumesUpstream =
+    (requestPath === "/v1/responses" || requestPath === "/v1/chat/completions") &&
+    req.method === "POST";
+
+  if (consumesUpstream) {
+    metricState = metrics.tryBegin({ countTotal: false });
     if (!metricState) {
+      res.setHeader("Retry-After", "1");
       sendError(
         res,
         429,

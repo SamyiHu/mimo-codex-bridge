@@ -1,6 +1,6 @@
 {
   "name": "mimo-codex-bridge",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "private": true,
   "type": "module",
   "description": "Local MiMo Desktop to Codex protocol bridge",

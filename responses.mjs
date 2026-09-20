@@ -7,6 +7,7 @@
  * - Chat Completions SSE 增量转换成 Responses SSE 事件
  */
 import { once } from "node:events";
+import { StringDecoder } from "node:string_decoder";
 
 const uid = (prefix) =>
   prefix + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-6);
@@ -245,20 +246,14 @@ export function toChatRequest(body, options = {}) {
 
   const messages = [];
   let pendingToolCalls = [];
-  const responseItems = new Map();
+  // 同一个索引同时承担两件事：解析 item_reference，以及判断某个引用是否已被
+  // 自动拼接进上下文（避免重复）。以前这里是两份内容相同的 Map + Set。
+  const previousItems = new Map();
 
   if (previousResponse?.output) {
     for (const item of previousResponse.output) {
-      if (item?.id) responseItems.set(item.id, item);
-      if (item?.call_id) responseItems.set(item.call_id, item);
-    }
-  }
-
-  const automaticPreviousItems = new Set();
-  if (previousResponse?.output) {
-    for (const item of previousResponse.output) {
-      if (item?.id) automaticPreviousItems.add(item.id);
-      if (item?.call_id) automaticPreviousItems.add(item.call_id);
+      if (item?.id) previousItems.set(item.id, item);
+      if (item?.call_id) previousItems.set(item.call_id, item);
     }
   }
 
@@ -358,9 +353,9 @@ export function toChatRequest(body, options = {}) {
         break;
 
       case "item_reference": {
-        if (automaticPreviousItems.has(item.id)) break;
+        if (previousItems.has(item.id)) break;
         const referenced =
-          responseItems.get(item.id) ??
+          previousItems.get(item.id) ??
           previousResponse?.output?.find(
             (candidate) =>
               candidate.id === item.id || candidate.call_id === item.id,
@@ -404,6 +399,12 @@ export function toChatRequest(body, options = {}) {
 
   if (!body.model || typeof body.model !== "string") {
     throw protocolError("model is required");
+  }
+
+  if (!messages.length) {
+    throw protocolError(
+      "input is empty: provide instructions, input or previous_response_id",
+    );
   }
 
   const chat = {
@@ -928,6 +929,11 @@ export function createResponseStreamTranslator(requestBody) {
   };
 
   return {
+    /** 返回正在构建的响应对象；调用方可据此尽早登记响应 ID 与取消控制器。 */
+    currentResponse() {
+      return response;
+    },
+
     start() {
       return [
         event("response.created", { response: { ...response, output: [] } }),
@@ -1163,11 +1169,20 @@ export function createResponseStreamTranslator(requestBody) {
       };
       return [event("response.failed", { response: { ...response } })];
     },
+
+    cancel() {
+      response.status = "cancelled";
+      response.incomplete_details = { reason: "cancelled" };
+      return [event("response.cancelled", { response: { ...response } })];
+    },
   };
 }
 
 /** 创建增量 SSE 解析器。 */
 export function createSseParser(onEvent) {
+  // 上游的 SSE chunk 边界与 UTF-8 字符边界无关，直接用
+  // Buffer#toString() 会把跨包的多字节字符切成 U+FFFD。
+  const decoder = new StringDecoder("utf8");
   let buffer = "";
   let currentEvent = "";
   let currentData = [];
@@ -1202,7 +1217,7 @@ export function createSseParser(onEvent) {
 
   return {
     push(chunk) {
-      buffer += Buffer.from(chunk).toString("utf8");
+      buffer += decoder.write(Buffer.from(chunk));
       while (true) {
         const match = buffer.match(/\r?\n/);
         if (!match) break;
@@ -1212,6 +1227,7 @@ export function createSseParser(onEvent) {
       }
     },
     end() {
+      buffer += decoder.end();
       if (buffer) {
         processLine(buffer);
         buffer = "";
