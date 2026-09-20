@@ -1,0 +1,6 @@
+# 本机凭据 / 运行产物
+token.txt
+debug-requests.jsonl
+*.bak
+*.log
+node_modules/
