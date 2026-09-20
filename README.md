@@ -1,122 +1,370 @@
 # mimo-codex-bridge
 
-用 **MiMo Desktop 的订阅套餐**驱动 **Codex** —— 本地桥接，**不需要官方 API key**。
+让 **Codex** 通过本地桥接使用 **MiMo Desktop** 的模型能力。
 
+```text
+Codex ── bridge-secret ──▶ mimo-bridge (127.0.0.1:8788)
+                              │
+                              ├─ Responses ⇄ Chat Completions
+                              ├─ 真实增量 SSE
+                              ├─ 状态 / 指标 / 熔断
+                              └─ MiMo token ──▶ MiMo Desktop Engine
 ```
-Codex ──/v1/responses──► mimo-bridge (127.0.0.1:8788)
-                              │  1. Responses ⇄ Chat Completions 翻译
-                              │  2. 注入本地自签 token + ?directory=<实例目录>
-                              │  3. 自动发现引擎端口（每次桌面端重启都会变）
-                              └──/v1/chat/completions──► MiMo Desktop 内嵌引擎 ──► 你的套餐
+
+当前版本：**2.2.0**。项目仅监听 `127.0.0.1`，不依赖第三方 npm 包。MiMo Desktop 的内部接口不是稳定公开接口，客户端升级后可能需要再次适配。
+
+## 两套凭据
+
+升级后不再让 Codex 直接持有 MiMo 引擎令牌：
+
+| 文件 | 用途 | 谁可以读取 |
+| --- | --- | --- |
+| `token.txt` | bridge 调用 MiMo 引擎 | 仅 bridge |
+| `bridge-secret.txt` | Codex 调用本地 bridge | Codex 配置与 bridge |
+
+```text
+Codex ── bridge-secret ──▶ bridge ── token.txt ──▶ MiMo Engine
 ```
 
-## 为什么要桥接
+`mint-token.mjs` 会为两个文件设置本机用户权限。Windows 下还会通过 ACL 取消继承，并只授予当前用户完全控制。
 
-MiMo Desktop 的订阅额度没有暴露 API key，但它的进程里内嵌了一个 MiMoCode 引擎：
+不要把两个文件提交到 Git；它们都已被 `.gitignore` 排除。
 
-- 在某个随机回环端口上提供 **OpenAI 兼容** 的 `/v1/chat/completions`（模型 id 形如 `xiaomi/mimo-x-pro-preview`）；
-- `/v1` 的鉴权是引擎自己签发的 **本地 token**，校验方式是「对提交值现算 sha256 与 `tokens.json` 里的记录比对」——所以本地自签一个即可；
-- token 与「实例目录」绑定，存储位置 `<state>/llm-server/<sha1(realpath(实例目录))>/tokens.json`，Windows 上 `<state>` 通常是 `%APPDATA%\Xiaomi MiMo\mimocode`；
-- 该文件**必须是 UTF-8 无 BOM**，否则引擎 `JSON.parse` 失败，等于整个文件作废；
-- 新版 Codex 只支持 `wire_api = "responses"`（`"chat"` 已被移除），所以桥接里带了 Responses ⇄ Chat 的翻译层。
+## 2.1 基础升级
+
+- Codex 与 MiMo 使用互相独立的凭据。
+- 新增授权状态接口 `/status` 和指标接口 `/metrics`。
+- 统计请求数量、状态码、模型、延迟、首个输出事件和真实 usage。
+- 默认最多并发 8 个模型请求，可通过环境变量调整。
+- 引擎连续失败 3 次后熔断 5 秒，并返回明确的 `503` 和 `Retry-After`。
+- 可重试的 `408`、`429` 和 `5xx` 会先重新发现引擎再重试一次。
+- 新增 `doctor.mjs`，自动检查 Node、bridge、MiMo 引擎、Codex 配置和实时请求。
+- 新增统一管理入口 `mimo-bridge.ps1`。
+- 新增可选的 Windows 登录自启动任务。
+- 新增真实 Codex 工具调用测试。
+- 所有指标只记录上游真实返回的数据；上游没有 usage 时保持为 0，不伪造 token 数。
+
+## 2.2 Responses 协议升级
+
+- 实现临时 Responses 状态存储和 `previous_response_id`。
+- 实现 `item_reference` 上下文引用与自动去重。
+- 实现 `GET /v1/responses/{id}` 响应查询。
+- 实现后台响应、取消和 `DELETE /v1/responses/{id}`。
+- 实现 `store`、`metadata`、`service_tier`、`background`、`user`、`prompt_cache_key` 等字段映射。
+- 实现 `text.format` JSON 结构化输出兼容；MiMo 不支持原生 `response_format` 时由 bridge 注入严格 JSON 约束并验证输出。
+- 实现自定义工具 Responses ⇄ Chat 映射；MiMo 只接受 function tool 时由 bridge 做协议模拟。
+- 完善图片、音频、文件输入，以及 refusal、annotations、usage details、finish reason 映射。
+- 对 MiMo 无法执行的 hosted prompt/tool 返回明确协议错误，不再静默丢弃。
+
+真实协议检查：
+
+```powershell
+npm run test:protocol-live
+# 或
+powershell -File .\mimo-bridge.ps1 protocol-live
+```
+
+检查 MiMo 是否在未来版本中原生支持 Responses：
+
+```powershell
+npm run probe:native
+# 或
+powershell -File .\mimo-bridge.ps1 native-probe
+```
+
+探测报告写入 `reports\mimo-native-responses.json`。
 
 ## 前置条件
 
-- MiMo Desktop 已安装并**登录**（引擎随它启动、随它退出）
-- Node.js ≥ 18（用到全局 fetch / AbortSignal.timeout）；本仓库在 Node 26 上验证过
-- Windows（端口发现用了 `netstat` / `tasklist`；macOS/Linux 需要另写发现逻辑）
+- MiMo Desktop 已安装并登录
+- Windows（端口发现使用 `netstat` 和 `tasklist`）
+- Node.js ≥ 18；当前已在 Node.js 24 上验证
+- Windows PowerShell 或 PowerShell 7
 
 ## 快速开始
 
 ```powershell
-# 1) 生成/复用 token，并写进引擎的 token 存储（会自动建 ~/.mimo-bridge）
+# 1) 生成或复用 MiMo token 和 bridge secret
 node mint-token.mjs
 
-# 2) 启动桥接（默认 127.0.0.1:8788，只监听回环）
-node bridge.mjs
-#   或后台启动： pwsh -File .\start-bridge.ps1
+# 2) 把 bridge-secret 写入 Codex 配置
+powershell -File .\apply-mimo-provider.ps1
 
-# 3) 看状态
-curl http://127.0.0.1:8788/health
-#   {"ok":true,"engine":"http://127.0.0.1:64765","instanceDir":"C:\\Users\\<you>\\.mimo-bridge"}
+# 3) 启动 bridge
+powershell -File .\mimo-bridge.ps1 start
 
-# 4) 让 Codex 用它
-pwsh -File .\apply-mimo-provider.ps1 -ApiKey (Get-Content .\token.txt -Raw).Trim() -MakeDefault
+# 4) 检查完整状态
+powershell -File .\mimo-bridge.ps1 doctor
 ```
 
-`apply-mimo-provider.ps1` 会先备份 `~/.codex/config.toml`，再写入：
-
-```toml
-model_provider = "mimo"
-model = "xiaomi/mimo-x-pro-preview"
-model_reasoning_effort = "high"
-
-[model_providers.mimo]
-name = "mimo"
-base_url = "http://127.0.0.1:8788/v1"
-wire_api = "responses"
-requires_openai_auth = false
-experimental_bearer_token = "<token.txt 的内容>"
-```
-
-不加 `-MakeDefault` 就只加 provider、不改默认；临时调用可以：
+需要切换 Codex 默认模型时：
 
 ```powershell
-codex exec -c model_provider=mimo -c model=xiaomi/mimo-x-pro-preview "say hi"
+powershell -File .\apply-mimo-provider.ps1 -MakeDefault
 ```
 
-可用模型：`xiaomi/mimo-x-pro-preview`、`xiaomi/mimo-pro`、`xiaomi/mimo-flash`、`xiaomi/mimo-auto`。
+不修改默认配置、临时调用一次：
 
-## 用 cc-switch 管理（可选）
+```powershell
+codex exec `
+  -c model_provider=mimo `
+  -c model=xiaomi/mimo-x-pro-preview `
+  "say hi"
+```
 
-cc-switch 切换供应商时会**整份重写** `~/.codex/config.toml`（供应商片段 + 公共配置合并），所以手改配置会在下次切换时被覆盖。
+常用模型：
 
-在 cc-switch 里「添加供应商」：名称 `Xiaomi MiMo (Desktop)`、Base URL `http://127.0.0.1:8788/v1`、密钥填 `token.txt`，
-配置框粘贴 [`cc-switch-provider.toml`](./cc-switch-provider.toml) 的内容即可。
+- `xiaomi/mimo-x-pro-preview`
+- `xiaomi/mimo-pro`
+- `xiaomi/mimo-flash`
+- `xiaomi/mimo-auto`
 
-## 故障排查
+## 管理命令
 
-| 现象 | 原因 | 处理 |
+统一入口为 `mimo-bridge.ps1`：
+
+```powershell
+# 查看完整状态
+powershell -File .\mimo-bridge.ps1 status
+
+# 只看运行指标
+powershell -File .\mimo-bridge.ps1 metrics
+
+# 启动、停止、重启
+powershell -File .\mimo-bridge.ps1 start
+powershell -File .\mimo-bridge.ps1 stop
+powershell -File .\mimo-bridge.ps1 restart
+
+# 自动诊断
+powershell -File .\mimo-bridge.ps1 doctor
+
+# 查看最近的脱敏调试日志
+powershell -File .\mimo-bridge.ps1 logs
+
+# 轮换 bridge secret，并自动更新 Codex 配置
+powershell -File .\mimo-bridge.ps1 rotate-secret
+
+# 运行真实 Codex 工具调用测试
+powershell -File .\mimo-bridge.ps1 live-test
+```
+
+轮换 bridge secret 不会更换 MiMo token，因此不会重建引擎令牌；只会更新 Codex ↔ bridge 之间的认证凭据。
+
+## 状态与指标
+
+`/health` 不要求凭据，适合快速探测：
+
+```powershell
+curl.exe http://127.0.0.1:8788/health
+```
+
+`/status` 和 `/metrics` 要求 bridge secret：
+
+```powershell
+powershell -File .\mimo-bridge.ps1 status
+powershell -File .\mimo-bridge.ps1 metrics
+```
+
+状态接口包含：
+
+- bridge PID、版本、Node 版本
+- MiMo 引擎地址和发现状态
+- 当前认证模式
+- 请求体、超时和并发限制
+- 按状态码、模型、错误类型统计的请求
+- 请求、上游响应头和首个输出事件延迟
+- 重试次数、熔断状态和引擎端口变化
+- 上游真实提供的 usage
+
+示例：
+
+```json
+{
+  "ok": true,
+  "version": "2.1.0",
+  "authMode": "bridge_secret",
+  "engine": "http://127.0.0.1:55461",
+  "limits": {
+    "max_concurrent_requests": 8,
+    "upstream_timeout_ms": 600000
+  },
+  "metrics": {
+    "requests": {
+      "total": 0,
+      "active": 0
+    },
+    "upstream": {
+      "breaker": {
+        "state": "closed"
+      }
+    }
+  }
+}
+```
+
+## 自动诊断
+
+```powershell
+npm run doctor
+# 或
+node doctor.mjs --port 8788
+```
+
+诊断内容：
+
+- Node.js 是否满足最低版本
+- `/health` 是否正常
+- `/status` 是否接受 bridge secret
+- MiMo token 是否能读取模型列表
+- 是否检测到 `xiaomi/` 模型
+- Codex 配置是否指向正确的 provider、URL、wire API 和 secret
+- bridge 进程是否仍然存在
+- 可选的真实模型请求是否返回内容
+
+只检查基础设施、不调用模型时：
+
+```powershell
+node doctor.mjs --port 8788 --no-live-request
+```
+
+## 测试
+
+### 自动测试
+
+```powershell
+npm run check
+npm test
+```
+
+自动测试不依赖真实 MiMo Desktop，覆盖：
+
+- Responses 与 Chat Completions 协议转换
+- 工具调用、`tool_choice` 和多模态内容
+- 真实增量 SSE 转换
+- SSE 分片解析
+- bridge secret 与 MiMo token 分离
+- 状态与 usage 指标
+- 并发统计和熔断器
+- 错误分类与重试状态
+
+### 真实 Responses 协议测试
+
+```powershell
+npm run test:protocol-live
+# 或
+powershell -File .\mimo-bridge.ps1 protocol-live
+```
+
+该测试使用真实 MiMo 上游验证结构化输出、`previous_response_id`、响应查询、后台响应、响应删除、自定义工具和 logprobs 能力。
+
+原生 Responses 探测：
+
+```powershell
+npm run probe:native
+# 或
+powershell -File .\mimo-bridge.ps1 native-probe
+```
+
+### 真实 Codex 工具测试
+
+```powershell
+npm run test:live
+```
+
+需要查看 Codex 实际调用了哪个自己的工具时：
+
+```powershell
+powershell -File .\mimo-bridge.ps1 live-test -ShowCommands
+```
+
+详细模式读取 Codex 的 JSONL 事件，显示 `command_execution`、`function_call`、文件修改等结构化工具事件。输出会自动遮蔽 token、bridge secret、Authorization 和当前用户名目录。
+
+如果要连续观察多个 Codex 自己的工具调用：
+
+```powershell
+powershell -File .\mimo-bridge.ps1 tools-demo -OpenReport
+# 或
+npm run demo:tools -- --open-report
+```
+
+每次演示都会把脱敏后的实际工具命令、命令输出和退出状态写入 `reports\tool-demo-latest.txt`。`-OpenReport` 会在结束后自动用记事本打开，因此不依赖 Codex 桌面 UI 是否显示工具结果。
+
+多工具演示会要求 Codex 分别创建两个文件、分别读取，再生成汇总文件，并打印每次结构化工具事件、实际命令和退出状态。
+
+该测试会：
+
+1. 通过当前 Codex 配置调用 `xiaomi/mimo-pro`。
+2. 要求 Codex 使用工具创建 `.bridge-live-tool-output.txt`。
+3. 验证文件内容必须为 `bridge-tool-ok`。
+4. 无论成功或失败都删除临时文件。
+
+## Windows 登录自启动
+
+```powershell
+# 创建登录自启动任务
+powershell -File .\mimo-bridge.ps1 install-startup
+
+# 删除任务
+powershell -File .\mimo-bridge.ps1 remove-startup
+```
+
+任务名称为 `MiMo Codex Bridge`。即使 MiMo Desktop 启动得稍慢，bridge 也会继续运行，并在 `/health` 或下一次请求时重新发现引擎。
+
+## 运行配置
+
+| 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `/health` 显示 `"ok": false` | 桌面端没开，或 token 没写进实例目录对应的桶 | 先开桌面端，再 `node mint-token.mjs` |
-| `401 invalid_api_key` | 同上；或 `tokens.json` 被写成带 BOM | 重跑 `mint-token.mjs`（Node 写出的文件无 BOM） |
-| `400` 提示某字段不支持 | 引擎对不支持的字段是拒绝而不是忽略 | 把该字段加进 `bridge.mjs` 的 `STRIP_FIELDS` |
-| `404 model_not_found` | 模型名少了 provider 前缀 | 用 `xiaomi/...` 全名 |
-| 端口发现失败 | 桌面端换了端口且探测超时 | 打开 `MIMO_BRIDGE_DEBUG=1` 看日志；`/health` 会重新发现 |
-| Codex 提示 `Model metadata ... not found` | 模型目录里没有对应条目 | 只是警告，不影响使用 |
+| `MIMO_BRIDGE_PORT` | `8788` | bridge 端口 |
+| `MIMO_BRIDGE_DIR` | `~/.mimo-bridge` | token 绑定的实例目录 |
+| `MIMO_BRIDGE_PROCESS` | `Xiaomi MiMo.exe` | 用于端口发现的进程名 |
+| `MIMO_BRIDGE_ENGINE_URL` | 空 | 固定引擎 URL，跳过端口发现 |
+| `MIMO_BRIDGE_SECRET` | 空 | 显式指定 bridge secret，优先于文件 |
+| `MIMO_BRIDGE_UPSTREAM_TIMEOUT_MS` | `600000` | 上游请求总超时 |
+| `MIMO_BRIDGE_MAX_BODY_BYTES` | `20971520` | 请求体上限 |
+| `MIMO_BRIDGE_MAX_CONCURRENT` | `8` | 模型请求最大并发数 |
+| `MIMO_BRIDGE_BREAKER_FAILURES` | `3` | 触发熔断的连续失败次数 |
+| `MIMO_BRIDGE_BREAKER_COOLDOWN_MS` | `5000` | 熔断冷却时间 |
+| `MIMO_BRIDGE_RESPONSE_TTL_MS` | `1800000` | Responses 状态保留时间 |
+| `MIMO_BRIDGE_RESPONSE_STATE_MAX` | `200` | 内存中最多保存的 Responses 数量 |
+| `BRIDGE_DEBUG` | `0` | 写入脱敏请求元数据 |
+| `BRIDGE_DEBUG_INCLUDE_BODY` | `0` | 显式开启后才记录完整请求体 |
 
-## 安全与合规
+## 使用 cc-switch（可选）
 
-- `token.txt` 是本机凭据，**已被 `.gitignore` 排除**；它只对你这台机器上的引擎有效（按实例目录绑定）。
-- 桥接只监听 `127.0.0.1`，不对外暴露；不要把它改成 `0.0.0.0`。
-- 走的是客户端内部接口，**未公开**：桌面端升级后可能失效。
-- 用订阅套餐做程序化调用通常不符合服务条款，账号风控自负。
+在 cc-switch 中添加供应商：
 
-## 卸载
+- 名称：`Xiaomi MiMo (Desktop)`
+- Base URL：`http://127.0.0.1:8788/v1`
+- Key：`bridge-secret.txt` 中的值
+- 配置：粘贴 `cc-switch-provider.toml`
 
-```powershell
-# 1) 恢复 Codex 配置（apply 脚本生成的备份）
-Copy-Item "$env:USERPROFILE\.codex\config.toml.bak-<时间戳>" "$env:USERPROFILE\.codex\config.toml" -Force
-
-# 2) 删掉自签的 token 桶（先看清桶名，再删）；或用 cleanup-buckets.mjs 自动清理
-node cleanup-buckets.mjs
-
-# 3) 删掉实例目录与 token
-Remove-Item -Recurse -Force "$env:USERPROFILE\.mimo-bridge", ".\token.txt"
-```
-
-## 文件
+## 文件结构
 
 | 文件 | 作用 |
 | --- | --- |
-| `bridge.mjs` | 桥接服务：Responses ⇄ Chat 翻译、端口发现、SSE 透传 |
-| `responses.mjs` | Responses API 与 Chat Completions 的双向转换 |
-| `mint-token.mjs` | 生成/复用 token 并写进引擎的 token 存储 |
-| `cleanup-buckets.mjs` | 清理自签留下的空桶（保留 MiMo 自己的 token） |
-| `apply-mimo-provider.ps1` | 写入 `~/.codex/config.toml`（自动备份、幂等、可 `-MakeDefault`） |
-| `start-bridge.ps1` / `stop-bridge.ps1` | 后台启停 |
-| `cc-switch-provider.toml` | cc-switch 供应商配置模板 |
+| `bridge.mjs` | 协议桥接、认证、端口发现、流式代理、熔断 |
+| `responses.mjs` | Responses ⇄ Chat Completions 转换与 SSE 解析 |
+| `protocol-state.mjs` | Responses 状态、TTL、取消和淘汰管理 |
+| `runtime.mjs` | 指标、并发限制、错误分类与熔断器 |
+| `mint-token.mjs` | 生成凭据、写入 MiMo token 存储、设置 ACL |
+| `doctor.mjs` | bridge、MiMo 与 Codex 配置诊断 |
+| `mimo-bridge.ps1` | 统一管理、诊断、轮换与自启动入口 |
+| `apply-mimo-provider.ps1` | 更新 Codex provider 配置 |
+| `test/` | 不依赖真实模型的自动测试 |
+| `live-checks/codex-tool.mjs` | 可选的真实 Codex 工具调用测试 |
+| `live-checks/protocol-live.mjs` | 真实 MiMo Responses 协议能力测试 |
+
+## 当前限制
+
+- 端口自动发现目前只支持 Windows。
+- Responses 状态是 bridge 进程内的临时状态；重启 bridge 后旧 `previous_response_id` 会失效。
+- MiMo 不返回原生 token logprobs 时，bridge 会接受并兼容该请求，但不会伪造日志概率数据。
+- MiMo 不提供 OpenAI hosted tools、prompt registry 或完整内部 reasoning 状态；这些能力会返回明确的协议错误。
+- reasoning 会转换成 Responses summary，但不会还原 MiMo 的完整内部推理状态。
+- 上游没有返回 usage 时，指标和 Codex 可能显示 `tokens used 0`。
+- 多模态内容会尽可能保留并交给上游，实际支持情况取决于 MiMo 模型版本。
+- 不要把 bridge 监听地址改成 `0.0.0.0`，否则本地凭据和模型请求会暴露到网络。
 
 ## 免责声明
 
-非官方项目，与小米 / MiMo 无关，仅供本机互操作实验。使用风险自负。
+非官方本机互操作实验项目，与小米 / MiMo 或 OpenAI 无关。内部接口与订阅能力可能随客户端版本变化，使用风险由使用者自行判断。

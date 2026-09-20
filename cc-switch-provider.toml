@@ -1,7 +1,7 @@
-# 粘贴到 cc-switch：Codex → 添加供应商 → 「配置」输入框
-# 名称填：Xiaomi MiMo (Desktop)
-# 官网：https://platform.xiaomimimo.com
-# 下面这段就是该供应商的 config（cc-switch 会与公共配置合并后写回 ~/.codex/config.toml）
+# cc-switch → Codex → 添加供应商 → 配置
+# 名称：Xiaomi MiMo (Desktop)
+# Base URL：http://127.0.0.1:8788/v1
+# Key：仓库中 bridge-secret.txt 的完整内容
 model_provider = "mimo"
 model = "xiaomi/mimo-x-pro-preview"
 model_reasoning_effort = "high"
@@ -11,4 +11,4 @@ name = "mimo"
 base_url = "http://127.0.0.1:8788/v1"
 wire_api = "responses"
 requires_openai_auth = false
-experimental_bearer_token = "<把 outputs\mimo-codex-bridge\token.txt 里的值粘到这里>"
+experimental_bearer_token = "<粘贴 bridge-secret.txt 的完整内容>"

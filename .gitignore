@@ -1,6 +1,13 @@
-# 本机凭据 / 运行产物
+# 本机数据 / 运行产物
 token.txt
+bridge-secret.txt
 debug-requests.jsonl
+bridge.pid
 *.bak
+*.bak-*
 *.log
 node_modules/
+coverage/
+reports/*.txt
+
+reports/*.json
