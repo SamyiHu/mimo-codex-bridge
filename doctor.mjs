@@ -55,6 +55,28 @@ function extractTomlString(text, name) {
   return match?.[1] ?? "";
 }
 
+/**
+ * 只在 [model_providers.<providerId>] 段内取值。
+ * 配置文件里可能还有别的 provider（例如前面的 DeepSeek），
+ * 用全局第一个匹配会取到它们的 base_url / token。
+ */
+function extractProviderString(text, providerId, name) {
+  if (!providerId) return "";
+  const lines = text.split(/\r?\n/);
+  let inside = false;
+  for (const line of lines) {
+    const header = /^\s*\[([^\]]*)\]\s*$/.exec(line);
+    if (header) {
+      inside = header[1].trim() === `model_providers.${providerId}`;
+      continue;
+    }
+    if (!inside) continue;
+    const match = new RegExp(`^\\s*${name}\\s*=\\s*"([^"]*)"`).exec(line);
+    if (match) return match[1];
+  }
+  return "";
+}
+
 const major = Number(process.versions.node.split(".")[0]);
 check(
   "node_version",
@@ -132,10 +154,11 @@ let configModel = "xiaomi/mimo-x-pro-preview";
 if (fs.existsSync(configPath)) {
   const config = fs.readFileSync(configPath, "utf8");
   const provider = extractTomlString(config, "model_provider");
-  const baseUrl = extractTomlString(config, "base_url");
-  const wireApi = extractTomlString(config, "wire_api");
-  const configuredSecret = extractTomlString(
+  const baseUrl = extractProviderString(config, provider, "base_url");
+  const wireApi = extractProviderString(config, provider, "wire_api");
+  const configuredSecret = extractProviderString(
     config,
+    provider,
     "experimental_bearer_token",
   );
   configModel =
