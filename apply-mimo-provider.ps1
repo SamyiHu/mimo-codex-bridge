@@ -89,7 +89,11 @@ $baseUrlToml = ConvertTo-TomlString $BaseUrl.Trim()
 $apiKeyToml = ConvertTo-TomlString $ApiKey
 $modelToml = ConvertTo-TomlString $Model.Trim()
 
+# Codex 默认会在 Responses 请求里带 web_search 工具，MiMo 引擎没有这个能力，
+# 不显式关掉的话每一轮请求都会被 bridge 判为不支持的协议而失败。
 $block = @(
+    "",
+    "web_search = `"disabled`"",
     "",
     "[model_providers.mimo]",
     "name = `"mimo`"",

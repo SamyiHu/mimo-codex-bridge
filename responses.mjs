@@ -133,9 +133,32 @@ function toChatToolChoice(toolChoice, options = {}) {
   );
 }
 
+// MiMo 引擎不提供 OpenAI 的 hosted 工具（web_search / file_search / code_interpreter 等）。
+// Codex 默认就会在 tools 里带上 web_search：这里一旦报错，默认配置下每一轮请求都会失败。
+// 因此"上游根本没有"的 hosted 工具直接丢弃并记日志，其它未知类型仍然明确报错。
+const HOSTED_TOOL_TYPES = new Set([
+  "web_search",
+  "web_search_preview",
+  "web_search_2025_08_26",
+  "file_search",
+  "computer_use_preview",
+  "computer_use",
+  "code_interpreter",
+  "image_generation",
+  "mcp",
+]);
+
 function toChatTools(tools, options = {}) {
-  return tools
-    .filter((tool) => tool && typeof tool === "object")
+  const kept = [];
+  for (const tool of tools ?? []) {
+    if (!tool || typeof tool !== "object") continue;
+    if (HOSTED_TOOL_TYPES.has(String(tool.type ?? ""))) {
+      options.onDroppedTool?.(String(tool.type));
+      continue;
+    }
+    kept.push(tool);
+  }
+  return kept
     .map((tool) => {
       if (tool.type === "custom") {
         if (options.emulateCustomTools) {
@@ -422,6 +445,7 @@ export function toChatRequest(body, options = {}) {
   }
   const compatibility = {
     emulateCustomTools: options.emulateCustomTools === true,
+    onDroppedTool: options.onDroppedTool,
   };
   const structuredOutput = options.structuredOutput ?? "native";
   const nativeLogprobs = options.nativeLogprobs ?? true;
@@ -429,7 +453,9 @@ export function toChatRequest(body, options = {}) {
     chat.tool_choice = toChatToolChoice(body.tool_choice, compatibility);
   }
   if (Array.isArray(body.tools) && body.tools.length) {
-    chat.tools = toChatTools(body.tools, compatibility);
+    const convertedTools = toChatTools(body.tools, compatibility);
+    // 全是 hosted 工具时不要下发空数组，免得上游把它理解成"禁用全部工具"。
+    if (convertedTools.length) chat.tools = convertedTools;
   }
 
   const responseFormat = toChatResponseFormat(body);

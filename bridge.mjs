@@ -62,7 +62,18 @@ const PROCESS_NAME = argOf(
   "--process",
   process.env.MIMO_BRIDGE_PROCESS || "Xiaomi MiMo.exe",
 );
+// MiMo Desktop 升级后模型 ID 从 xiaomi/* 变成了 mimo-desktop/*，
+// 所以前缀和兜底模型都做成可配置，别再写死。
+const MODEL_PREFIX = argOf(
+  "--model-prefix",
+  process.env.MIMO_BRIDGE_MODEL_PREFIX || "mimo-desktop",
+);
+const MODEL_FALLBACK = argOf(
+  "--model-fallback",
+  process.env.MIMO_BRIDGE_MODEL_FALLBACK || "mimo-desktop/mimo-x-pro-preview",
+);
 const ENGINE_URL = (
+
   argOf("--engine-url", process.env.MIMO_BRIDGE_ENGINE_URL || "") || ""
 )
   .trim()
@@ -298,9 +309,10 @@ async function probe(port) {
     return (
       !!payload &&
       Array.isArray(payload.data) &&
-      payload.data.some((model) =>
-        String(model?.id || "").startsWith("xiaomi/"),
-      )
+      payload.data.some((model) => {
+        const id = String(model?.id || "");
+        return id.startsWith("xiaomi/") || id.startsWith("mimo-desktop/");
+      })
     );
   } catch {
     return false;
@@ -466,7 +478,7 @@ function normalizeModel(body) {
     typeof body.model === "string" &&
     !body.model.includes("/")
   ) {
-    body.model = `xiaomi/${body.model}`;
+    body.model = `${MODEL_PREFIX}/${body.model}`;
   }
 }
 
@@ -477,6 +489,66 @@ function debugLog(entry) {
   try {
     fs.appendFileSync(DEBUG_FILE, JSON.stringify(safeEntry) + "\n");
   } catch {}
+}
+
+// 引擎只认自己的模型 id（xiaomi/...）。桌面端选择器里可能仍显示官方模型，
+// 或用户手填了别的名字：把这些"引擎上没有的模型"兜底映射到一个可用模型，
+// 而不是直接 404。用 MIMO_BRIDGE_MODEL_FALLBACK=off 可关闭。
+let knownModels = null;
+let knownModelsFetchedAt = 0;
+async function fetchKnownModels(base) {
+  if (knownModels && Date.now() - knownModelsFetchedAt < 60000) return knownModels;
+  try {
+    const url = new URL(base + "/v1/models");
+    url.searchParams.set("directory", INSTANCE_DIR);
+    const response = await fetch(url, {
+      headers: { Authorization: "Bearer " + TOKEN },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) return knownModels;
+    const payload = await response.json();
+    const ids = (payload?.data ?? []).map((model) => String(model?.id ?? "")).filter(Boolean);
+    if (ids.length) {
+      knownModels = new Set(ids);
+      knownModelsFetchedAt = Date.now();
+    }
+  } catch {}
+  return knownModels;
+}
+
+// 兜底顺序：显式配置的 MODEL_FALLBACK，然后引擎上任意一个桌面端对话模型。
+// 这样 MiMo Desktop 下次升级改名也不会再把请求打到不存在的模型上。
+const FALLBACK_CANDIDATES = [
+  MODEL_FALLBACK,
+  "mimo-desktop/mimo-x-pro-preview",
+  "mimo-desktop/mimo-pro",
+  "mimo-desktop/mimo-flash",
+  "mimo-desktop/mimo-auto",
+];
+
+function pickFallbackModel(known) {
+  for (const candidate of FALLBACK_CANDIDATES) {
+    if (candidate && candidate !== "off" && known.has(candidate)) return candidate;
+  }
+  for (const id of known) {
+    if (id.startsWith("mimo-desktop/") && !/asr|tts/i.test(id)) return id;
+  }
+  return null;
+}
+
+async function applyModelFallback(base, chatBody) {
+  if (MODEL_FALLBACK === "off" || !chatBody?.model) return;
+  const known = await fetchKnownModels(base);
+  if (!known || known.size === 0) return;
+  if (known.has(chatBody.model)) return;
+  const requested = chatBody.model;
+  const fallback = pickFallbackModel(known);
+  if (!fallback) return;
+  chatBody.model = fallback;
+  debugLog({ event: "model_fallback", from: requested, to: fallback });
+  console.error(
+    `[bridge] model "${requested}" is not on the MiMo engine; falling back to ${fallback}`,
+  );
 }
 
 function parseJsonBody(raw) {
@@ -946,6 +1018,8 @@ async function handleApiRequest(req, res, metricState = null) {
         structuredOutput: "prompt",
         emulateCustomTools: true,
         nativeLogprobs: false,
+        onDroppedTool: (type) =>
+          debugLog({ event: "dropped_hosted_tool", tool_type: type }),
       });
     } catch (error) {
       return sendError(
@@ -993,6 +1067,10 @@ async function handleApiRequest(req, res, metricState = null) {
   let upstreamPath = requestPath;
   if (isResponses) upstreamPath = "/v1/chat/completions";
 
+  // 个别模型（如 xiaomi/mimo-x-pro-preview）不接受 reasoning_effort，
+  // 上游会明确 400；这种情况下去掉该字段重试一次，而不是把错误抛给客户端。
+  let droppedReasoningEffort = false;
+
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const base = await discoverEngine(attempt > 0);
     if (!base) {
@@ -1005,6 +1083,7 @@ async function handleApiRequest(req, res, metricState = null) {
       );
     }
 
+    await applyModelFallback(base, chatBody);
     const target = upstreamUrl(base, upstreamPath);
     const upstreamRequestStartedAt = Date.now();
     try {
@@ -1035,6 +1114,50 @@ async function handleApiRequest(req, res, metricState = null) {
 
       if (isResponses) {
         if (!upstream.ok) {
+          if (
+            !droppedReasoningEffort &&
+            upstream.status === 400 &&
+            chatBody &&
+            Object.hasOwn(chatBody, "reasoning_effort")
+          ) {
+            const probe = await upstream.clone().json().catch(() => null);
+            const probeMessage = String(probe?.error?.message ?? "");
+            let adapted = false;
+            if (/does not support reasoning_effort/i.test(probeMessage)) {
+              // 这个模型完全不接受该参数（例如 xiaomi/mimo-x-pro-preview）
+              delete chatBody.reasoning_effort;
+              adapted = true;
+            } else {
+              // 只接受部分档位：降级到上游列出的最高档
+              const supported =
+                /supported:\s*([a-z,\s]+)/i.exec(probeMessage)?.[1] ?? "";
+              const order = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+              const levels = order.filter((level) =>
+                new RegExp(`\\b${level}\\b`, "i").test(supported),
+              );
+              if (levels.length) {
+                chatBody.reasoning_effort = levels[levels.length - 1];
+                adapted = true;
+              }
+            }
+            if (adapted) {
+              droppedReasoningEffort = true;
+              metrics.observeRetry();
+              debugLog({
+                event: "reasoning_effort_adapted",
+                model: chatBody.model,
+                reasoning_effort: chatBody.reasoning_effort ?? null,
+                upstream_message: probeMessage,
+              });
+              abortContext.dispose();
+              abortContext = createAbortContext([
+                clientAbort.signal,
+                cancellation.signal,
+              ]);
+              attempt -= 1; // 参数适配，不占用引擎重试次数
+              continue;
+            }
+          }
           const message = await readUpstreamError(upstream);
           metrics.observeError(errorTypeFromStatus(upstream.status));
           if (isRetryableStatus(upstream.status)) {
@@ -1094,6 +1217,50 @@ async function handleApiRequest(req, res, metricState = null) {
         }
       } else {
         if (!upstream.ok) {
+          if (
+            !droppedReasoningEffort &&
+            upstream.status === 400 &&
+            chatBody &&
+            Object.hasOwn(chatBody, "reasoning_effort")
+          ) {
+            const probe = await upstream.clone().json().catch(() => null);
+            const probeMessage = String(probe?.error?.message ?? "");
+            let adapted = false;
+            if (/does not support reasoning_effort/i.test(probeMessage)) {
+              // 这个模型完全不接受该参数（例如 xiaomi/mimo-x-pro-preview）
+              delete chatBody.reasoning_effort;
+              adapted = true;
+            } else {
+              // 只接受部分档位：降级到上游列出的最高档
+              const supported =
+                /supported:\s*([a-z,\s]+)/i.exec(probeMessage)?.[1] ?? "";
+              const order = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+              const levels = order.filter((level) =>
+                new RegExp(`\\b${level}\\b`, "i").test(supported),
+              );
+              if (levels.length) {
+                chatBody.reasoning_effort = levels[levels.length - 1];
+                adapted = true;
+              }
+            }
+            if (adapted) {
+              droppedReasoningEffort = true;
+              metrics.observeRetry();
+              debugLog({
+                event: "reasoning_effort_adapted",
+                model: chatBody.model,
+                reasoning_effort: chatBody.reasoning_effort ?? null,
+                upstream_message: probeMessage,
+              });
+              abortContext.dispose();
+              abortContext = createAbortContext([
+                clientAbort.signal,
+                cancellation.signal,
+              ]);
+              attempt -= 1; // 参数适配，不占用引擎重试次数
+              continue;
+            }
+          }
           const message = await readUpstreamError(upstream);
           metrics.observeError(errorTypeFromStatus(upstream.status));
           if (isRetryableStatus(upstream.status)) {

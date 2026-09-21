@@ -24,11 +24,21 @@ const liveRequest = !hasFlag("--no-live-request");
 const bridgeBase = `http://127.0.0.1:${port}`;
 const bridgeSecretFile = path.join(projectDir, "bridge-secret.txt");
 const mimoTokenFile = path.join(projectDir, "token.txt");
-
+/**
+ * 读凭据文件。读不到（不存在或权限不足）时返回 null 而不是抛栈：
+ * doctor 的职责是报告问题，而不是自己先崩掉。
+ */
 function readCredential(file, fallback) {
-  return fs.existsSync(file)
-    ? fs.readFileSync(file, "utf8").trim()
-    : fallback;
+  if (!fs.existsSync(file)) return fallback;
+  try {
+    return fs.readFileSync(file, "utf8").trim();
+  } catch (error) {
+    console.error(
+      "[doctor] 读不到 " + file + " (" + (error && error.code ? error.code : error) + ")：" +
+        "如果你不是用创建它的那个 Windows 账户运行，就会被 ACL 拦住。",
+    );
+    return null;
+  }
 }
 
 const mimoToken = readCredential(mimoTokenFile, "");

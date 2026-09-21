@@ -6,6 +6,7 @@ bridge.pid
 *.bak
 *.bak-*
 *.log
+*.log.err
 node_modules/
 coverage/
 reports/*.txt

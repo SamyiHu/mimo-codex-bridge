@@ -296,7 +296,7 @@ test("bridge authenticates requests and forwards real upstream streaming", async
     assert.match(streamText, /second/);
     assert.match(streamText, /event: response\.completed/);
     assert.equal(receivedChatBody.stream, true);
-    assert.equal(receivedChatBody.model, "xiaomi/mimo-pro");
+    assert.equal(receivedChatBody.model, "mimo-desktop/mimo-pro");
 
     const statusUnauthorized = await fetch(
       `http://127.0.0.1:${bridgePort}/status`,
@@ -315,7 +315,7 @@ test("bridge authenticates requests and forwards real upstream streaming", async
     assert.equal(status.bridgeSecretConfigured, true);
     assert.equal(status.engine, `http://127.0.0.1:${enginePort}`);
     assert.ok(status.metrics.requests.total >= 3);
-    assert.ok(status.metrics.requests.by_model["xiaomi/mimo-pro"] >= 1);
+    assert.ok(status.metrics.requests.by_model["mimo-desktop/mimo-pro"] >= 1);
     assert.equal(status.metrics.usage.total_tokens, 3, JSON.stringify(status.metrics.usage));
     assert.equal(status.metrics.upstream.breaker.state, "closed");
     assert.equal(status.protocol.previous_response_id, true);

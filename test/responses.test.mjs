@@ -484,12 +484,29 @@ test("rejects unsupported hosted prompt and tool types explicitly", () => {
     () => toChatRequest({ model: "mimo-pro", prompt: { id: "prompt_1" } }),
     (error) => error.statusCode === 501 && error.code === "unsupported_response_prompt",
   );
+  // web_search 等 hosted 工具：MiMo 引擎没有对应能力，而 Codex 默认就会下发，
+  // 所以丢弃而不是让整轮请求失败；只有真正未知的类型才明确报错。
+  const droppedTools = toChatRequest({
+    model: "mimo-pro",
+    input: "hello",
+    tools: [{ type: "web_search" }, { type: "function", name: "shell" }],
+  });
+  assert.deepEqual(
+    droppedTools.tools.map((tool) => tool.function?.name ?? tool.type),
+    ["shell"],
+  );
+  const onlyHosted = toChatRequest({
+    model: "mimo-pro",
+    input: "hello",
+    tools: [{ type: "web_search" }],
+  });
+  assert.equal(onlyHosted.tools, undefined);
   assert.throws(
     () =>
       toChatRequest({
         model: "mimo-pro",
         input: "hello",
-        tools: [{ type: "web_search" }],
+        tools: [{ type: "quantum_search" }],
       }),
     (error) => error.code === "unsupported_tool_type",
   );

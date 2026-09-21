@@ -2,13 +2,18 @@
 # 名称：Xiaomi MiMo (Desktop)
 # Base URL：http://127.0.0.1:8788/v1
 # Key：仓库中 bridge-secret.txt 的完整内容
+#
+# 注意：MiMo Desktop 2026-09 升级后模型 ID 从 xiaomi/* 改成了 mimo-desktop/*，
+# 旧 ID 会 404。用 `node live-checks/native-responses-probe.mjs` 或直接看
+# http://127.0.0.1:8788/v1/models 可以确认当前可用的模型 ID。
 model_provider = "mimo"
-model = "xiaomi/mimo-x-pro-preview"
-model_reasoning_effort = "high"
+model = "mimo-desktop/mimo-x-pro-preview"
+model_catalog_json = "cc-switch-model-catalog.json"
+web_search = "disabled"
 
 [model_providers.mimo]
 name = "mimo"
 base_url = "http://127.0.0.1:8788/v1"
 wire_api = "responses"
 requires_openai_auth = false
-experimental_bearer_token = "<粘贴 bridge-secret.txt 的完整内容>"
+experimental_bearer_token = "<填 bridge-secret.txt 的完整内容>"

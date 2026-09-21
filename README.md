@@ -102,10 +102,37 @@ powershell -File .\apply-mimo-provider.ps1
 
 # 3) 启动 bridge
 powershell -File .\mimo-bridge.ps1 start
+# 或直接双击仓库里的 start-bridge.bat / 启动 MiMo 桥.bat
+# （失败会停住并打印 bridge-start.log / bridge-runtime.log）
 
 # 4) 检查完整状态
 powershell -File .\mimo-bridge.ps1 doctor
 ```
+
+无参数双击 `mimo-bridge.ps1` 时：bridge 在跑则显示 status；没跑则自动 start，窗口会停住显示结果，不会红窗一闪就关。
+
+## 启动不起来 / 红窗一闪就关
+
+按这个顺序排查：
+
+1. **卡巴斯基 / 杀软误杀**  
+   本仓库的 `node.exe` 子进程、`start-bridge.ps1`、`bridge.mjs`、`schtasks` 创建自启任务都可能被拦截，表现为：双击启动红字一闪、`spawn EPERM`、`Access is denied`、Codex 一直 `error sending request`。  
+   请在卡巴斯基里为以下路径加**排除/信任**（或暂时退出防护再启动）：
+   - 本仓库目录（`...\mimo-codex-bridge`）
+   - `C:\Program Files\nodejs\node.exe`
+   - 用户 Startup 目录下的 `MiMo-Codex-Bridge.bat`
+   - `%USERPROFILE%\.mimo-bridge`
+2. **PowerShell 脚本编码**  
+   Windows PowerShell 5.1 要求 `.ps1` 使用 **UTF-8 with BOM**。若你改过脚本后中文注释处解析失败，先给文件补 BOM。
+3. **权限**  
+   `mimo-bridge.ps1 install-startup` 需要能创建计划任务；无管理员权限时用 Startup 文件夹方案：
+   `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\MiMo-Codex-Bridge.bat`
+4. **前置条件**  
+   MiMo Desktop 已登录并运行；已执行 `node mint-token.mjs`；`token.txt` 与 `bridge-secret.txt` 存在。
+
+启动日志：
+- `bridge-start.log` — 启动脚本过程
+- `bridge-runtime.log` / `bridge-runtime.log.err` — node 进程 stdout/stderr
 
 需要切换 Codex 默认模型时：
 
@@ -350,6 +377,21 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 - Key：`bridge-secret.txt` 中的值
 - 配置：粘贴 `cc-switch-provider.toml`
 
+配置里有两处是必须的，漏掉就会出问题：
+
+1. `web_search = "disabled"`
+   Codex 默认会在 Responses 请求的 tools 里带上 web_search，MiMo 引擎没有这个能力。
+   bridge 现在会丢弃这类 hosted 工具而不是报错，但显式关掉更干净，也少一次无效请求。
+2. `model_catalog_json`
+   cc-switch 生成的 cc-switch-model-catalog.json 里通常只有当前供应商的模型，
+   切到 mimo 后选择器里看不到 xiaomi/*，Codex 还会警告 Model metadata not found。补一下目录：
+
+   ```powershell
+   node add-model-catalog.mjs --catalog mimo-models.json
+   ```
+
+   脚本会自动备份。注意不要指向 cc-switch-model-catalog.json：cc-switch 每次切换供应商都会重写它，xiaomi 条目会被冲掉（实测过）。用独立的 mimo-models.json 只需生成一次。
+
 ## 文件结构
 
 | 文件 | 作用 |
@@ -361,6 +403,7 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 | `mint-token.mjs` | 生成凭据、写入 MiMo token 存储、设置 ACL |
 | `doctor.mjs` | bridge、MiMo 与 Codex 配置诊断 |
 | `mimo-bridge.ps1` | 统一管理、诊断、轮换与自启动入口 |
+| `start-bridge.bat` / `启动 MiMo 桥.bat` | 可双击启动，失败会停住并显示日志 |
 | `apply-mimo-provider.ps1` | 更新 Codex provider 配置 |
 | `test/` | 不依赖真实模型的自动测试 |
 | `live-checks/codex-tool.mjs` | 可选的真实 Codex 工具调用测试 |
@@ -368,6 +411,9 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 
 ## 当前限制
 
+- MiMo Desktop 升级会改模型 ID：2026-09 这次把 xiaomi/mimo-* 换成了 mimo-desktop/mimo-*，旧 ID 会 404。
+  bridge 的兜底逻辑会自动在引擎现有模型里挑一个可用的，但也建议同步更新配置和目录里的模型名。
+  用 node live-checks/native-responses-probe.mjs 或直接看 http://127.0.0.1:8788/v1/models 可以确认当前 ID。
 - 端口自动发现目前只支持 Windows。
 - Responses 状态是 bridge 进程内的临时状态；重启 bridge 后旧 `previous_response_id` 会失效。
 - MiMo 不返回原生 token logprobs 时，bridge 会接受并兼容该请求，但不会伪造日志概率数据。
@@ -375,6 +421,7 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 - reasoning 会转换成 Responses summary，但不会还原 MiMo 的完整内部推理状态。
 - 上游没有返回 usage 时，指标和 Codex 可能显示 `tokens used 0`。
 - 多模态内容会尽可能保留并交给上游，实际支持情况取决于 MiMo 模型版本。
+- Codex 默认下发的 hosted 工具（web_search / file_search / code_interpreter 等）会被 bridge 丢弃而不是报错，因为 MiMo 引擎没有对应能力；真正未知的工具类型仍然返回明确的协议错误。
 - 不要把 bridge 监听地址改成 `0.0.0.0`，否则本地凭据和模型请求会暴露到网络。
 - bridge 默认校验 `Host` 头，只接受 `127.0.0.1` / `localhost` / `[::1]`。若经反向代理访问，请用 `MIMO_BRIDGE_ALLOWED_HOSTS` 放行对应 Host。
 

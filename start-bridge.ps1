@@ -51,15 +51,29 @@ if (Test-Path -LiteralPath $pidFile) {
     [System.IO.File]::Delete($pidFile)
 }
 
+$logFile = Join-Path $dir "bridge-runtime.log"
+$startLog = Join-Path $dir "bridge-start.log"
+
+function Write-StartLog([string]$Message) {
+    $stamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $line = "[$stamp] $Message"
+    Add-Content -LiteralPath $startLog -Value $line -Encoding UTF8
+    Write-Host $line
+}
+
 if ($Foreground) {
-    & node $entry --port $Port
+    Write-StartLog "foreground start on port $Port"
+    & node $entry --port $Port 2>&1 | Tee-Object -FilePath $logFile
     return
 }
 
+Write-StartLog "background start on port $Port; runtime log -> $logFile"
 $process = Start-Process -FilePath "node" `
     -ArgumentList @($entry, "--port", "$Port") `
     -WorkingDirectory $dir `
     -WindowStyle Hidden `
+    -RedirectStandardOutput $logFile `
+    -RedirectStandardError "$logFile.err" `
     -PassThru
 [System.IO.File]::WriteAllText($pidFile, [string]$process.Id)
 
@@ -79,12 +93,22 @@ while ([DateTime]::UtcNow -lt $deadline) {
 }
 
 if ($health) {
-    Write-Host "bridge 已启动（PID $($process.Id)）：$health" -ForegroundColor Green
+    Write-StartLog "bridge started PID $($process.Id): $health"
 } else {
     if ($process.HasExited) {
         [System.IO.File]::Delete($pidFile)
-        throw "bridge 启动失败，进程已退出（ExitCode $($process.ExitCode)）。"
+        $detail = "bridge 启动失败，进程已退出（ExitCode $($process.ExitCode)）。"
+        $errLog = "$logFile.err"
+        if (Test-Path -LiteralPath $errLog) {
+            $errText = (Get-Content -LiteralPath $errLog -Raw -ErrorAction SilentlyContinue)
+            if ($errText) { $detail += " stderr: " + $errText.Trim() }
+        } elseif (Test-Path -LiteralPath $logFile) {
+            $outText = (Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue)
+            if ($outText) { $detail += " stdout: " + $outText.Trim() }
+        }
+        Write-StartLog $detail
+        throw $detail
     }
-    Write-Host "bridge 进程已启动（PID $($process.Id)），但健康检查暂未通过。" -ForegroundColor Yellow
+    Write-StartLog "bridge process PID $($process.Id) started but health check not ready yet"
     Write-Host "请确认 MiMo Desktop 已运行，并已执行 node mint-token.mjs。" -ForegroundColor Yellow
 }
