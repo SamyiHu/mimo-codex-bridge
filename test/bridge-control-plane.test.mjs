@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
 import { spawn } from "node:child_process";
@@ -247,7 +247,9 @@ test("cancelling a streaming response aborts upstream and ends with cancelled", 
     const decoder = new TextDecoder();
     let text = "";
     let responseId = null;
-    while (!responseId) {
+    const deadline = Date.now() + 5000;
+    // response.created 里就带 id，但中文 delta 可能晚于它到达：继续读到文本出现为止
+    while ((!responseId || !text.includes("流式片段")) && Date.now() < deadline) {
       const { value, done } = await reader.read();
       if (done) break;
       text += decoder.decode(value, { stream: true });

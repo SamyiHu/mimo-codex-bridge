@@ -50,7 +50,7 @@ fs.mkdirSync(path.dirname(bridgeSecretFile), { recursive: true });
 function currentWindowsAccount() {
   const domain = process.env.USERDOMAIN;
   const user = process.env.USERNAME || os.userInfo().username;
-  if (domain && user && !user.includes("\\")) return `${domain}\\ ${user}`;
+  if (domain && user && !user.includes("\\")) return `${domain}\\${user}`;
   return user;
 }
 
