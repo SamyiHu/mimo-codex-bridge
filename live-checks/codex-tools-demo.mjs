@@ -72,7 +72,7 @@ function runCodex() {
 
   const script =
     "& codex exec --json --skip-git-repo-check --sandbox workspace-write " +
-    "-c model_provider=mimo -c model=xiaomi/mimo-pro " +
+    "-c model_provider=mimo -c model=xiaomi/mimo-pro -c model_reasoning_effort=high " +
     `'${prompt}'`;
 
   return new Promise((resolve) => {

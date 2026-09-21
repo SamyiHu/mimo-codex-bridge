@@ -165,7 +165,7 @@ function runCodex() {
     "& codex exec" +
     jsonFlag +
     " --skip-git-repo-check --sandbox workspace-write " +
-    "-c model_provider=mimo -c model=xiaomi/mimo-pro " +
+    "-c model_provider=mimo -c model=xiaomi/mimo-pro -c model_reasoning_effort=high " +
     "'Create a file named .bridge-live-tool-output.txt in the current working directory containing exactly bridge-tool-ok. Use your file editing or shell tool. Do not use any other file.'";
 
   return new Promise((resolve) => {
