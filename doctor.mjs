@@ -160,7 +160,7 @@ if (status?.engine && mimoToken) {
   );
 }
 
-let configModel = "xiaomi/mimo-x-pro-preview";
+let configModel = "mimo-desktop/mimo-pro";
 if (fs.existsSync(configPath)) {
   const config = fs.readFileSync(configPath, "utf8");
   const provider = extractTomlString(config, "model_provider");

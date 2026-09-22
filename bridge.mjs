@@ -31,6 +31,11 @@ import {
   sseWrite,
 } from "./responses.mjs";
 import { ResponseStore } from "./protocol-state.mjs";
+import {
+  estimateChatRequestTokens,
+  estimateChatResponseTokens,
+  hasRealUsage,
+} from "./token-estimate.mjs";
 
 const args = process.argv.slice(2);
 const argOf = (name, fallback) => {
@@ -70,7 +75,11 @@ const MODEL_PREFIX = argOf(
 );
 const MODEL_FALLBACK = argOf(
   "--model-fallback",
-  process.env.MIMO_BRIDGE_MODEL_FALLBACK || "mimo-desktop/mimo-x-pro-preview",
+  process.env.MIMO_BRIDGE_MODEL_FALLBACK || "mimo-desktop/mimo-pro",
+);
+// 上游不返回 usage 时是否用本地估算器补齐（MIMO_BRIDGE_TOKEN_ESTIMATE=off 关闭）。
+const TOKEN_ESTIMATE_ENABLED = !/^(0|off|false)$/i.test(
+  process.env.MIMO_BRIDGE_TOKEN_ESTIMATE || "1",
 );
 const ENGINE_URL = (
 
@@ -491,9 +500,11 @@ function debugLog(entry) {
   } catch {}
 }
 
-// 引擎只认自己的模型 id（xiaomi/...）。桌面端选择器里可能仍显示官方模型，
-// 或用户手填了别的名字：把这些"引擎上没有的模型"兜底映射到一个可用模型，
-// 而不是直接 404。用 MIMO_BRIDGE_MODEL_FALLBACK=off 可关闭。
+// 引擎上真正可用的是 mimo-desktop/* 订阅模型；列表里的 xiaomi/* 走云端、
+// 需要小米 API Key，桌面 token 调用会报 Invalid API Key。
+// 桌面端选择器里可能仍显示官方模型，或用户手填了别的名字：把这些
+// "引擎上没有的模型"兜底映射到一个可用模型，而不是直接 404。
+// 用 MIMO_BRIDGE_MODEL_FALLBACK=off 可关闭。
 let knownModels = null;
 let knownModelsFetchedAt = 0;
 async function fetchKnownModels(base) {
@@ -520,8 +531,8 @@ async function fetchKnownModels(base) {
 // 这样 MiMo Desktop 下次升级改名也不会再把请求打到不存在的模型上。
 const FALLBACK_CANDIDATES = [
   MODEL_FALLBACK,
-  "mimo-desktop/mimo-x-pro-preview",
   "mimo-desktop/mimo-pro",
+  "mimo-desktop/mimo-v2.6-pro",
   "mimo-desktop/mimo-flash",
   "mimo-desktop/mimo-auto",
 ];
@@ -549,6 +560,38 @@ async function applyModelFallback(base, chatBody) {
   console.error(
     `[bridge] model "${requested}" is not on the MiMo engine; falling back to ${fallback}`,
   );
+}
+
+/**
+ * 上游没给 usage 时的本地估算（启发式，非精确值）。
+ * 返回标准 usage 形状；无法估算或功能关闭时返回 null。
+ */
+function estimatedUsageFor(chatBody, chatPayload) {
+  if (!TOKEN_ESTIMATE_ENABLED) return null;
+  const inputTokens = estimateChatRequestTokens(chatBody);
+  const outputTokens = estimateChatResponseTokens(chatPayload);
+  if (inputTokens + outputTokens <= 0) return null;
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: inputTokens + outputTokens,
+  };
+}
+
+/** 有真实 usage 就记真实值，否则补估算值；两者在指标里分开统计。 */
+function applyEstimatedUsage(response, chatBody, chatPayload) {
+  if (hasRealUsage(response.usage)) {
+    metrics.observeUsage(response.usage);
+    return;
+  }
+  const estimated = estimatedUsageFor(chatBody, chatPayload);
+  if (!estimated) {
+    metrics.observeUsage(response.usage);
+    return;
+  }
+  response.usage = estimated;
+  metrics.observeEstimatedUsage(estimated);
+  debugLog({ event: "usage_estimated", ...estimated });
 }
 
 function parseJsonBody(raw) {
@@ -641,7 +684,11 @@ async function proxyResponsesStream({
     "X-Request-ID": requestId,
   });
 
-  const translator = createResponseStreamTranslator(requestBody);
+  const translator = createResponseStreamTranslator(requestBody, {
+    estimatedInputTokens: TOKEN_ESTIMATE_ENABLED
+      ? estimateChatRequestTokens(chatBody)
+      : 0,
+  });
   for (const evt of translator.start()) await sseWrite(res, evt);
 
   // 响应 ID 在 response.created 里已经交给客户端，此时就可以登记，
@@ -711,7 +758,13 @@ async function proxyResponsesStream({
       normalizeStructuredResponse(completed.response, requestBody);
       rememberResponse(completed.response);
     }
-    metrics.observeUsage(completed?.response?.usage);
+    if (completed?.response) {
+      if (translator.usageEstimated()) {
+        metrics.observeEstimatedUsage(completed.response.usage);
+      } else {
+        metrics.observeUsage(completed.response.usage);
+      }
+    }
     for (const evt of completedEvents) await sseWrite(res, evt);
     res.end();
   } catch (error) {
@@ -1208,7 +1261,7 @@ async function handleApiRequest(req, res, metricState = null) {
               body,
             ),
           );
-          metrics.observeUsage(response.usage);
+          applyEstimatedUsage(response, chatBody, payload);
           metrics.observeFirstToken(
             metricState,
             Date.now() - metricState.startedAt,
@@ -1411,6 +1464,10 @@ async function runBackgroundResponse(body, chatBody, requestId) {
       });
     }
 
+    // 与前台路径对齐：后台请求同样要做模型兜底，否则 MiMo 改模型 ID 后
+    // 后台响应会直接打到不存在的模型上。
+    await applyModelFallback(base, chatBody);
+
     const upstream = await fetchUpstream(
       upstreamUrl(base, "/v1/chat/completions"),
       {
@@ -1444,8 +1501,8 @@ async function runBackgroundResponse(body, chatBody, requestId) {
     );
     response.id = queuedId;
     response.background = true;
+    applyEstimatedUsage(response, chatBody, payload);
     rememberResponse(response);
-    metrics.observeUsage(response.usage);
   } catch (error) {
     const current = responseStore.get(queuedId);
     if (current?.status === "cancelled") {

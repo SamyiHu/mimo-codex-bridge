@@ -71,6 +71,13 @@ export class MetricsRegistry {
       output_tokens: 0,
       total_tokens: 0,
     };
+    // 上游没给 usage、由本地估算器补齐的统计；与真实 usage 分开，避免混计。
+    this.estimatedUsage = {
+      requests: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+    };
     this.breaker = new CircuitBreaker({
       failures: breakerFailures,
       cooldownMs: breakerCooldownMs,
@@ -154,6 +161,15 @@ export class MetricsRegistry {
     this.usage.total_tokens += total;
   }
 
+  observeEstimatedUsage(usage) {
+    const total = Number(usage?.total_tokens || 0);
+    if (!Number.isFinite(total) || total <= 0) return;
+    this.estimatedUsage.requests += 1;
+    this.estimatedUsage.input_tokens += Number(usage.input_tokens || 0);
+    this.estimatedUsage.output_tokens += Number(usage.output_tokens || 0);
+    this.estimatedUsage.total_tokens += total;
+  }
+
   objectMap(map) {
     return Object.fromEntries([...map.entries()].sort());
   }
@@ -195,7 +211,7 @@ export class MetricsRegistry {
         discoveries: this.engineDiscoveries,
         port_changes: this.enginePortChanges,
       },
-      usage: { ...this.usage },
+      usage: { ...this.usage, estimated: { ...this.estimatedUsage } },
     };
   }
 }

@@ -3,12 +3,15 @@
 # Base URL：http://127.0.0.1:8788/v1
 # Key：仓库中 bridge-secret.txt 的完整内容
 #
-# 注意：MiMo Desktop 2026-09 升级后模型 ID 从 xiaomi/* 改成了 mimo-desktop/*，
-# 旧 ID 会 404。用 `node live-checks/native-responses-probe.mjs` 或直接看
+# 注意：MiMo Desktop 26.922 起引擎列表里的 xiaomi/* 走云端、需要小米 API Key，
+# 桌面订阅 token 调不通；可用的只有 mimo-desktop/*。用
+# `node live-checks/native-responses-probe.mjs` 或直接看
 # http://127.0.0.1:8788/v1/models 可以确认当前可用的模型 ID。
+# model_catalog_json 指向独立的 mimo-models.json：cc-switch 每次切换供应商
+# 都会重写 cc-switch-model-catalog.json，指向它会被冲掉。
 model_provider = "mimo"
-model = "mimo-desktop/mimo-x-pro-preview"
-model_catalog_json = "cc-switch-model-catalog.json"
+model = "mimo-desktop/mimo-pro"
+model_catalog_json = "mimo-models.json"
 web_search = "disabled"
 
 [model_providers.mimo]

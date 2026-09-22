@@ -8,6 +8,10 @@
  */
 import { once } from "node:events";
 import { StringDecoder } from "node:string_decoder";
+import {
+  estimateResponsesOutputTokens,
+  hasRealUsage,
+} from "./token-estimate.mjs";
 
 const uid = (prefix) =>
   prefix + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-6);
@@ -876,9 +880,16 @@ export function responseEvents(response) {
  * push() 接收已解析的 chat.completion.chunk；
  * end() 输出最终状态；
  * fail() 用于上游流中断。
+ *
+ * options.estimatedInputTokens：上游从头到尾没给 usage 时，end() 会用
+ * 该输入估算值 + 输出内容的本地估算补齐 usage；上游给过则原样保留。
  */
-export function createResponseStreamTranslator(requestBody) {
+export function createResponseStreamTranslator(requestBody, options = {}) {
   const response = makeBaseResponse(null, requestBody);
+  const estimatedInputTokens = Number(options.estimatedInputTokens) > 0
+    ? Number(options.estimatedInputTokens)
+    : null;
+  let usageEstimated = false;
   const customToolNames = new Set(
     (requestBody?.tools ?? [])
       .filter((tool) => tool?.type === "custom")
@@ -958,6 +969,11 @@ export function createResponseStreamTranslator(requestBody) {
     /** 返回正在构建的响应对象；调用方可据此尽早登记响应 ID 与取消控制器。 */
     currentResponse() {
       return response;
+    },
+
+    /** end() 补齐的 usage 是本地估算的吗？指标侧据此区分统计。 */
+    usageEstimated() {
+      return usageEstimated;
     },
 
     start() {
@@ -1183,6 +1199,13 @@ export function createResponseStreamTranslator(requestBody) {
 
       response.status = "completed";
       response.output = response.output.map((item) => ({ ...item, status: "completed" }));
+      if (!hasRealUsage(response.usage) && estimatedInputTokens !== null) {
+        setUsage(response, {
+          prompt_tokens: estimatedInputTokens,
+          completion_tokens: estimateResponsesOutputTokens(response),
+        });
+        usageEstimated = true;
+      }
       events.push(event("response.completed", { response: { ...response } }));
       return events;
     },

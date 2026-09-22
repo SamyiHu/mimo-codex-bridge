@@ -11,7 +11,7 @@ Codex ── bridge-secret ──▶ mimo-bridge (127.0.0.1:8788)
                               └─ MiMo token ──▶ MiMo Desktop Engine
 ```
 
-当前版本：**2.3.0**。项目仅监听 `127.0.0.1`，不依赖第三方 npm 包。MiMo Desktop 的内部接口不是稳定公开接口，客户端升级后可能需要再次适配。
+当前版本：**2.4.0**。项目仅监听 `127.0.0.1`，不依赖第三方 npm 包。MiMo Desktop 的内部接口不是稳定公开接口，客户端升级后可能需要再次适配。
 
 ## 两套凭据
 
@@ -42,7 +42,7 @@ Codex ── bridge-secret ──▶ bridge ── token.txt ──▶ MiMo Engi
 - 新增统一管理入口 `mimo-bridge.ps1`。
 - 新增可选的 Windows 登录自启动任务。
 - 新增真实 Codex 工具调用测试。
-- 所有指标只记录上游真实返回的数据；上游没有 usage 时保持为 0，不伪造 token 数。
+- 指标里上游真实 usage 与本地估算值分开统计（2.4 起缺失 usage 由估算器补齐，见下）。
 
 ## 2.2 Responses 协议升级
 
@@ -83,6 +83,14 @@ powershell -File .\mimo-bridge.ps1 native-probe
 - 端口发现改为异步子进程：重新发现引擎时不再阻塞事件循环，在飞的流式响应不再出现约 260ms 的卡顿。
 - 新增 Host 头校验，默认只接受 loopback 请求，缓解 DNS rebinding。
 - bridge secret 比较改为常量时间比较。
+
+## 2.4 Token 估算与 26.922 适配
+
+- 上游不返回 usage 时，bridge 用本地估算器补齐 token 数（CJK ≈ 1 token/字，其余 ≈ 4 字符/token，含消息与工具模板开销），Codex 不再显示 `tokens used 0`。
+- 上游给了 usage 就原样透传；估算只在缺失或全零时生效。
+- `/status` 的 `metrics.usage` 只统计上游真实 usage，`metrics.usage.estimated` 单独统计估算值，不互相混计。
+- `MIMO_BRIDGE_TOKEN_ESTIMATE=off` 可关闭估算。
+- 适配 MiMo Desktop 26.922：模型 ID 统一为 `mimo-desktop/*`（引擎列表里的 `xiaomi/*` 需要云端 API Key）；后台响应路径补上模型兜底。
 
 ## 前置条件
 
@@ -145,16 +153,17 @@ powershell -File .\apply-mimo-provider.ps1 -MakeDefault
 ```powershell
 codex exec `
   -c model_provider=mimo `
-  -c model=xiaomi/mimo-x-pro-preview `
+  -c model=mimo-desktop/mimo-pro `
   "say hi"
 ```
 
-常用模型：
+常用模型（26.922 实测，引擎列表里的 `xiaomi/*` 走云端、需要小米 API Key，桌面订阅调不通）：
 
-- `xiaomi/mimo-x-pro-preview`
-- `xiaomi/mimo-pro`
-- `xiaomi/mimo-flash`
-- `xiaomi/mimo-auto`
+- `mimo-desktop/mimo-pro`
+- `mimo-desktop/mimo-v2.6-pro`
+- `mimo-desktop/mimo-v2.6-flash`
+- `mimo-desktop/mimo-flash`
+- `mimo-desktop/mimo-auto`
 
 ## 管理命令
 
@@ -211,7 +220,7 @@ powershell -File .\mimo-bridge.ps1 metrics
 - 按状态码、模型、错误类型统计的请求
 - 请求、上游响应头和首个输出事件延迟
 - 重试次数、熔断状态和引擎端口变化
-- 上游真实提供的 usage
+- 上游真实 usage 与本地估算 usage（分开统计）
 
 示例：
 
@@ -361,6 +370,8 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 | `MIMO_BRIDGE_MAX_CONCURRENT` | `8` | 模型请求最大并发数 |
 | `MIMO_BRIDGE_BREAKER_FAILURES` | `3` | 触发熔断的连续失败次数 |
 | `MIMO_BRIDGE_BREAKER_COOLDOWN_MS` | `5000` | 熔断冷却时间 |
+| `MIMO_BRIDGE_MODEL_FALLBACK` | `mimo-desktop/mimo-pro` | 请求了引擎上不存在的模型时的兜底模型；`off` 关闭兜底 |
+| `MIMO_BRIDGE_TOKEN_ESTIMATE` | `1` | 上游缺失 usage 时是否本地估算补齐；`off` 关闭 |
 | `MIMO_BRIDGE_RESPONSE_TTL_MS` | `1800000` | Responses 状态保留时间 |
 | `MIMO_BRIDGE_RESPONSE_STATE_MAX` | `200` | 内存中最多保存的 Responses 数量 |
 | `MIMO_BRIDGE_ALLOWED_HOSTS` | 空 | 额外允许的 `Host` 头，逗号分隔 |
@@ -400,6 +411,7 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 | `responses.mjs` | Responses ⇄ Chat Completions 转换与 SSE 解析 |
 | `protocol-state.mjs` | Responses 状态、TTL、取消和淘汰管理 |
 | `runtime.mjs` | 指标、并发限制、错误分类与熔断器 |
+| `token-estimate.mjs` | 上游缺失 usage 时的本地 token 估算器 |
 | `mint-token.mjs` | 生成凭据、写入 MiMo token 存储、设置 ACL |
 | `doctor.mjs` | bridge、MiMo 与 Codex 配置诊断 |
 | `mimo-bridge.ps1` | 统一管理、诊断、轮换与自启动入口 |
@@ -411,15 +423,17 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 
 ## 当前限制
 
-- MiMo Desktop 升级会改模型 ID：2026-09 这次把 xiaomi/mimo-* 换成了 mimo-desktop/mimo-*，旧 ID 会 404。
-  bridge 的兜底逻辑会自动在引擎现有模型里挑一个可用的，但也建议同步更新配置和目录里的模型名。
+- MiMo Desktop 升级会改模型 ID：26.922 起 `xiaomi/mimo-*` 旧 ID 全部下线，
+  引擎列表里的 `xiaomi/*` 新 ID（v2.5/v2.6）走云端、需要小米 API Key，桌面订阅调不通；
+  可用的是 `mimo-desktop/*`。桥的兜底逻辑（前台与后台响应都会走）会自动在引擎现有
+  模型里挑一个可用的，但也建议同步更新配置和目录里的模型名。
   用 node live-checks/native-responses-probe.mjs 或直接看 http://127.0.0.1:8788/v1/models 可以确认当前 ID。
 - 端口自动发现目前只支持 Windows。
 - Responses 状态是 bridge 进程内的临时状态；重启 bridge 后旧 `previous_response_id` 会失效。
 - MiMo 不返回原生 token logprobs 时，bridge 会接受并兼容该请求，但不会伪造日志概率数据。
 - MiMo 不提供 OpenAI hosted tools、prompt registry 或完整内部 reasoning 状态；这些能力会返回明确的协议错误。
 - reasoning 会转换成 Responses summary，但不会还原 MiMo 的完整内部推理状态。
-- 上游没有返回 usage 时，指标和 Codex 可能显示 `tokens used 0`。
+- 上游没有返回 usage 时，bridge 会用本地启发式估算器补齐 token 数（非精确值，数量级参考）；`MIMO_BRIDGE_TOKEN_ESTIMATE=off` 可关闭，关闭后 Codex 可能显示 `tokens used 0`。
 - 多模态内容会尽可能保留并交给上游，实际支持情况取决于 MiMo 模型版本。
 - Codex 默认下发的 hosted 工具（web_search / file_search / code_interpreter 等）会被 bridge 丢弃而不是报错，因为 MiMo 引擎没有对应能力；真正未知的工具类型仍然返回明确的协议错误。
 - 不要把 bridge 监听地址改成 `0.0.0.0`，否则本地凭据和模型请求会暴露到网络。

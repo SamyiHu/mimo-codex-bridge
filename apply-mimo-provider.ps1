@@ -8,7 +8,7 @@ param(
     [string]$BaseUrl = "http://127.0.0.1:8788/v1",
     [string]$ConfigPath = "$env:USERPROFILE\.codex\config.toml",
     [string]$SecretFile = "",
-    [string]$Model = "xiaomi/mimo-x-pro-preview",
+    [string]$Model = "mimo-desktop/mimo-pro",
     [switch]$MakeDefault
 )
 

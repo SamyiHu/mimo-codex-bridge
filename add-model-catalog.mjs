@@ -1,8 +1,10 @@
 // add-model-catalog.mjs — 往 Codex 的模型目录里补 MiMo 条目，让 Codex(含桌面端选择器) 能显示并选中它们。
 //
 // 背景：config.toml 里的 model_catalog_json 指向的目录只有别的供应商的模型，
-// 所以选择器里看不到 xiaomi/*；Codex 还会警告 "Model metadata not found"。
-// 档位来自实测：x-*-preview 不接受 reasoning_effort，其余三个只支持 low/medium/high。
+// 所以选择器里看不到 mimo-desktop/*；Codex 还会警告 "Model metadata not found"。
+// 档位来自实测（26.922）：mimo-desktop/* 对话模型都接受 reasoning_effort
+// （low/medium/high）。引擎列表里的 xiaomi/* 走云端、需要小米 API Key，
+// 桌面订阅 token 调不通，因此不收录。
 //
 // 用法：node add-model-catalog.mjs [--config <config.toml>] [--dry-run]
 import fs from "node:fs";
@@ -57,23 +59,23 @@ const BASIC_LEVELS = [
 
 const definitions = [
   {
-    slug: "mimo-desktop/mimo-x-pro-preview",
-    display_name: "MiMo X Pro (Preview)",
-    description: "Xiaomi MiMo X Pro Preview via MiMo Desktop bridge",
-    priority: 1010,
-    reasoning: [],
-  },
-  {
-    slug: "mimo-desktop/mimo-x-flash-preview",
-    display_name: "MiMo X Flash (Preview)",
-    description: "Xiaomi MiMo X Flash Preview via MiMo Desktop bridge",
-    priority: 1009,
-    reasoning: [],
-  },
-  {
     slug: "mimo-desktop/mimo-pro",
     display_name: "MiMo Pro",
     description: "Xiaomi MiMo Pro via MiMo Desktop bridge",
+    priority: 1010,
+    reasoning: BASIC_LEVELS,
+  },
+  {
+    slug: "mimo-desktop/mimo-v2.6-pro",
+    display_name: "MiMo v2.6 Pro",
+    description: "Xiaomi MiMo v2.6 Pro via MiMo Desktop bridge",
+    priority: 1009,
+    reasoning: BASIC_LEVELS,
+  },
+  {
+    slug: "mimo-desktop/mimo-v2.6-flash",
+    display_name: "MiMo v2.6 Flash",
+    description: "Xiaomi MiMo v2.6 Flash via MiMo Desktop bridge",
     priority: 1008,
     reasoning: BASIC_LEVELS,
   },

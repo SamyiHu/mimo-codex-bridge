@@ -22,6 +22,11 @@ test("metrics registry tracks concurrency, latency, usage and models", () => {
     output_tokens: 4,
     total_tokens: 7,
   });
+  metrics.observeEstimatedUsage({
+    input_tokens: 10,
+    output_tokens: 20,
+    total_tokens: 30,
+  });
   metrics.finish(first, 200);
 
   const snapshot = metrics.snapshot();
@@ -35,6 +40,12 @@ test("metrics registry tracks concurrency, latency, usage and models", () => {
     input_tokens: 3,
     output_tokens: 4,
     total_tokens: 7,
+    estimated: {
+      requests: 1,
+      input_tokens: 10,
+      output_tokens: 20,
+      total_tokens: 30,
+    },
   });
 });
 

@@ -65,7 +65,7 @@ results.status = {
 };
 
 const structuredBody = {
-  model: "xiaomi/mimo-pro",
+  model: "mimo-desktop/mimo-pro",
   instructions: "Return valid JSON only.",
   input: "Return an object with ok set to true and protocol set to full.",
   reasoning: { effort: "high", summary: "auto" },
@@ -109,7 +109,7 @@ results.core.structured_output = {
 const stateSeed = await request(`${base}/v1/responses`, {
   method: "POST",
   body: JSON.stringify({
-    model: "xiaomi/mimo-pro",
+    model: "mimo-desktop/mimo-pro",
     input: "Remember the codeword BRIDGE-ALPHA.",
     store: true,
   }),
@@ -119,7 +119,7 @@ if (previousId) {
   const second = await request(`${base}/v1/responses`, {
     method: "POST",
     body: JSON.stringify({
-      model: "xiaomi/mimo-pro",
+      model: "mimo-desktop/mimo-pro",
       previous_response_id: previousId,
       input:
         "What codeword did I ask you to remember? Reply with the codeword only.",
@@ -149,7 +149,7 @@ if (previousId) {
 const background = await request(`${base}/v1/responses`, {
   method: "POST",
   body: JSON.stringify({
-    model: "xiaomi/mimo-pro",
+    model: "mimo-desktop/mimo-pro",
     input: "Reply with BACKGROUND-OK only.",
     background: true,
   }),
@@ -197,7 +197,7 @@ if (background.payload?.id) {
 const custom = await request(`${base}/v1/responses`, {
   method: "POST",
   body: JSON.stringify({
-    model: "xiaomi/mimo-pro",
+    model: "mimo-desktop/mimo-pro",
     input: "Call the echo_custom tool with input hello.",
     tools: [
       {
@@ -220,7 +220,7 @@ results.upstream_capabilities.custom_tools = {
 const logprobs = await request(`${base}/v1/responses`, {
   method: "POST",
   body: JSON.stringify({
-    model: "xiaomi/mimo-pro",
+    model: "mimo-desktop/mimo-pro",
     input: "Reply OK.",
     logprobs: true,
     top_logprobs: 2,
