@@ -296,7 +296,17 @@ test("bridge authenticates requests and forwards real upstream streaming", async
     assert.match(streamText, /second/);
     assert.match(streamText, /event: response\.completed/);
     assert.equal(receivedChatBody.stream, true);
+    assert.deepEqual(receivedChatBody.stream_options, { include_usage: true });
     assert.equal(receivedChatBody.model, "mimo-desktop/mimo-pro");
+    const completedPayload = streamText
+      .split("\n")
+      .find((line) => line.startsWith("data: ") && line.includes("response.completed"))
+      ?.slice("data: ".length);
+    assert.deepEqual(JSON.parse(completedPayload).response.usage, {
+      input_tokens: 1,
+      output_tokens: 2,
+      total_tokens: 3,
+    });
 
     const statusUnauthorized = await fetch(
       `http://127.0.0.1:${bridgePort}/status`,

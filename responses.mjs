@@ -110,6 +110,56 @@ function serializeToolOutput(output) {
   return JSON.stringify(output ?? "");
 }
 
+const MULTIMODAL_TOOL_PART_TYPES = new Set([
+  "input_image",
+  "image_url",
+  "input_audio",
+  "output_audio",
+  "audio",
+  "input_file",
+  "file",
+]);
+
+function splitMultimodalToolOutput(output, callId) {
+  if (
+    !Array.isArray(output) ||
+    !output.some(
+      (part) =>
+        part &&
+        typeof part === "object" &&
+        MULTIMODAL_TOOL_PART_TYPES.has(String(part.type)),
+    )
+  ) {
+    return { toolContent: serializeToolOutput(output), attachments: [] };
+  }
+
+  const text = [];
+  const attachments = [];
+  for (const part of output) {
+    if (typeof part === "string") {
+      text.push(part);
+      continue;
+    }
+    if (!part || typeof part !== "object") continue;
+    if (["input_text", "output_text", "text", "refusal"].includes(part.type)) {
+      text.push(String(part.text ?? part.refusal ?? part.content ?? ""));
+      continue;
+    }
+    const converted = toChatContentPart(part);
+    if (MULTIMODAL_TOOL_PART_TYPES.has(String(converted.type))) {
+      attachments.push(converted);
+    } else {
+      text.push(JSON.stringify(part));
+    }
+  }
+
+  text.push(
+    `[Multimodal tool output ${callId || "unknown"}: ` +
+      `${attachments.length} media item(s) attached below.]`,
+  );
+  return { toolContent: text.filter(Boolean).join("\n"), attachments };
+}
+
 function toChatToolChoice(toolChoice, options = {}) {
   if (typeof toolChoice === "string") return toolChoice;
   if (!toolChoice || typeof toolChoice !== "object") return "auto";
@@ -273,6 +323,7 @@ export function toChatRequest(body, options = {}) {
 
   const messages = [];
   let pendingToolCalls = [];
+  const deferredToolAttachments = [];
   // 同一个索引同时承担两件事：解析 item_reference，以及判断某个引用是否已被
   // 自动拼接进上下文（避免重复）。以前这里是两份内容相同的 Map + Set。
   const previousItems = new Map();
@@ -294,6 +345,24 @@ export function toChatRequest(body, options = {}) {
     pendingToolCalls = [];
   };
 
+  // MiMo 的 tool 消息只接受文本。图片/音频/文件工具结果必须延迟到同一组
+  // tool 消息之后，再以多模态 user content 传给模型，不能 JSON.stringify
+  // 成 Base64 文本，否则上下文会被图片数据撑爆。
+  const flushToolAttachments = () => {
+    if (!deferredToolAttachments.length) return;
+    messages.push({
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "The following media items were returned by completed tool calls.",
+        },
+        ...deferredToolAttachments,
+      ],
+    });
+    deferredToolAttachments.length = 0;
+  };
+
   const instructions = body.instructions ?? previousResponse?.instructions;
   if (instructions) {
     messages.push({ role: "system", content: String(instructions) });
@@ -301,11 +370,19 @@ export function toChatRequest(body, options = {}) {
 
   const consume = (item) => {
     if (typeof item === "string") {
+      flushToolAttachments();
       flushToolCalls();
       messages.push({ role: "user", content: item });
       return;
     }
     if (!item || typeof item !== "object") return;
+
+    const isToolOutput =
+      item.type === "function_call_output" ||
+      item.type === "custom_tool_call_output";
+    if (!isToolOutput && item.type !== "item_reference") {
+      flushToolAttachments();
+    }
 
     switch (item.type) {
       case "message":
@@ -335,11 +412,18 @@ export function toChatRequest(body, options = {}) {
 
       case "function_call_output":
         flushToolCalls();
-        messages.push({
-          role: "tool",
-          tool_call_id: item.call_id || item.id,
-          content: serializeToolOutput(item.output),
-        });
+        {
+          const output = splitMultimodalToolOutput(
+            item.output,
+            item.call_id || item.id,
+          );
+          deferredToolAttachments.push(...output.attachments);
+          messages.push({
+            role: "tool",
+            tool_call_id: item.call_id || item.id,
+            content: output.toolContent,
+          });
+        }
         break;
 
       case "custom_tool_call": {
@@ -368,11 +452,18 @@ export function toChatRequest(body, options = {}) {
 
       case "custom_tool_call_output":
         flushToolCalls();
-        messages.push({
-          role: "tool",
-          tool_call_id: item.call_id || item.id,
-          content: serializeToolOutput(item.output),
-        });
+        {
+          const output = splitMultimodalToolOutput(
+            item.output,
+            item.call_id || item.id,
+          );
+          deferredToolAttachments.push(...output.attachments);
+          messages.push({
+            role: "tool",
+            tool_call_id: item.call_id || item.id,
+            content: output.toolContent,
+          });
+        }
         break;
 
       case "reasoning":
@@ -423,6 +514,7 @@ export function toChatRequest(body, options = {}) {
 
   for (const item of inputItems) consume(item);
   flushToolCalls();
+  flushToolAttachments();
 
   if (!body.model || typeof body.model !== "string") {
     throw protocolError("model is required");

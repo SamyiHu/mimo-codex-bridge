@@ -11,7 +11,7 @@ Codex ── bridge-secret ──▶ mimo-bridge (127.0.0.1:8788)
                               └─ MiMo token ──▶ MiMo Desktop Engine
 ```
 
-当前版本：**2.4.0**。项目仅监听 `127.0.0.1`，不依赖第三方 npm 包。MiMo Desktop 的内部接口不是稳定公开接口，客户端升级后可能需要再次适配。
+当前版本：**2.5.0**。项目仅监听 `127.0.0.1`。MiMo Desktop 的内部接口不是稳定公开接口，客户端升级后可能需要再次适配。
 
 ## 两套凭据
 
@@ -86,11 +86,19 @@ powershell -File .\mimo-bridge.ps1 native-probe
 
 ## 2.4 Token 估算与 26.922 适配
 
-- 上游不返回 usage 时，bridge 用本地估算器补齐 token 数（CJK ≈ 1 token/字，其余 ≈ 4 字符/token，含消息与工具模板开销），Codex 不再显示 `tokens used 0`。
-- 上游给了 usage 就原样透传；估算只在缺失或全零时生效。
+- 适配 MiMo Desktop 26.922：模型 ID 统一为 `mimo-desktop/*`（引擎列表里的 `xiaomi/*` 需要云端 API Key）；后台响应路径补上模型兜底。
+
+## 2.5 启动、配置边界与上下文修复
+
+- 唯一推荐启动入口是 `启动 MiMo 桥.bat`；它只初始化 bridge 凭据并启动服务，不修改 Codex 的 model 或模型目录。
+- cc-switch 是一等配置路径。bridge 只提供 `model_providers.mimo` 连接能力，模型继续由 cc-switch / 用户管理。
+- 新增可选 `configure-codex`：直接写 Codex provider，但默认仍不改 `model`、`model_catalog_json`；`restore-codex` 可恢复原配置。
+- 流式请求会向 MiMo 要求最终 usage chunk，Codex 的上下文统计优先使用上游真实 `prompt/completion/total_tokens`。
+- 上游缺失 usage 时才使用本地估算：文本采用 tokenx 多语言规则，图片按尺寸和 512px 分块计数，不再忽略图片。
+- `ImageView` 等工具返回的图片会作为多模态附件继续交给模型，不再序列化成大段 Base64 工具文本。
+- `store=true` 的 Responses 状态会持久化到 `~/.mimo-bridge/responses-state.json`，重启 bridge 后仍可续接；活动响应不会被 TTL 或容量淘汰中断。
 - `/status` 的 `metrics.usage` 只统计上游真实 usage，`metrics.usage.estimated` 单独统计估算值，不互相混计。
 - `MIMO_BRIDGE_TOKEN_ESTIMATE=off` 可关闭估算。
-- 适配 MiMo Desktop 26.922：模型 ID 统一为 `mimo-desktop/*`（引擎列表里的 `xiaomi/*` 需要云端 API Key）；后台响应路径补上模型兜底。
 
 ## 前置条件
 
@@ -101,20 +109,19 @@ powershell -File .\mimo-bridge.ps1 native-probe
 
 ## 快速开始
 
+双击 `启动 MiMo 桥.bat`。它只做三件事：生成/复用凭据、启动 bridge、显示状态。
+
 ```powershell
-# 1) 生成或复用 MiMo token 和 bridge secret
-node mint-token.mjs
+powershell -File .\mimo-bridge.ps1 setup
+```
 
-# 2) 把 bridge-secret 写入 Codex 配置
-powershell -File .\apply-mimo-provider.ps1
+然后在 **cc-switch 或 Codex 配置里自行选择模型**。bridge 不会写入默认模型，也不会接管模型目录。
 
-# 3) 启动 bridge
-powershell -File .\mimo-bridge.ps1 start
-# 或直接双击仓库里的 start-bridge.bat / 启动 MiMo 桥.bat
-# （失败会停住并打印 bridge-start.log / bridge-runtime.log）
+若不想使用 cc-switch，可显式写入 provider 连接段；该命令仍不修改 model / model_catalog_json：
 
-# 4) 检查完整状态
-powershell -File .\mimo-bridge.ps1 doctor
+```powershell
+powershell -File .\mimo-bridge.ps1 configure-codex
+powershell -File .\mimo-bridge.ps1 restore-codex
 ```
 
 无参数双击 `mimo-bridge.ps1` 时：bridge 在跑则显示 status；没跑则自动 start，窗口会停住显示结果，不会红窗一闪就关。
@@ -142,7 +149,7 @@ powershell -File .\mimo-bridge.ps1 doctor
 - `bridge-start.log` — 启动脚本过程
 - `bridge-runtime.log` / `bridge-runtime.log.err` — node 进程 stdout/stderr
 
-需要切换 Codex 默认模型时：
+确需让脚本切换默认模型时，必须显式使用底层命令：
 
 ```powershell
 powershell -File .\apply-mimo-provider.ps1 -MakeDefault
@@ -157,11 +164,11 @@ codex exec `
   "say hi"
 ```
 
-常用模型（26.922 实测，引擎列表里的 `xiaomi/*` 走云端、需要小米 API Key，桌面订阅调不通）：
+常用模型（26.922 / 2.6 实测；`xiaomi/*` 走云端、需要小米 API Key，桌面订阅调不通，用 `mimo-desktop/*`）：
 
-- `mimo-desktop/mimo-pro`
 - `mimo-desktop/mimo-v2.6-pro`
 - `mimo-desktop/mimo-v2.6-flash`
+- `mimo-desktop/mimo-pro`（当前代 Pro 别名）
 - `mimo-desktop/mimo-flash`
 - `mimo-desktop/mimo-auto`
 
@@ -170,6 +177,9 @@ codex exec `
 统一入口为 `mimo-bridge.ps1`：
 
 ```powershell
+# 初始化凭据并启动（推荐）
+powershell -File .\mimo-bridge.ps1 setup
+
 # 查看完整状态
 powershell -File .\mimo-bridge.ps1 status
 
@@ -180,6 +190,10 @@ powershell -File .\mimo-bridge.ps1 metrics
 powershell -File .\mimo-bridge.ps1 start
 powershell -File .\mimo-bridge.ps1 stop
 powershell -File .\mimo-bridge.ps1 restart
+
+# 可选：只写 Codex provider；不改 model / 模型目录
+powershell -File .\mimo-bridge.ps1 configure-codex
+powershell -File .\mimo-bridge.ps1 restore-codex
 
 # 自动诊断
 powershell -File .\mimo-bridge.ps1 doctor
@@ -370,16 +384,16 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 | `MIMO_BRIDGE_MAX_CONCURRENT` | `8` | 模型请求最大并发数 |
 | `MIMO_BRIDGE_BREAKER_FAILURES` | `3` | 触发熔断的连续失败次数 |
 | `MIMO_BRIDGE_BREAKER_COOLDOWN_MS` | `5000` | 熔断冷却时间 |
-| `MIMO_BRIDGE_MODEL_FALLBACK` | `mimo-desktop/mimo-pro` | 请求了引擎上不存在的模型时的兜底模型；`off` 关闭兜底 |
+| `MIMO_BRIDGE_MODEL_FALLBACK` | `mimo-desktop/mimo-v2.6-pro` | 请求了引擎上不存在的模型时的兜底模型；`off` 关闭兜底 |
 | `MIMO_BRIDGE_TOKEN_ESTIMATE` | `1` | 上游缺失 usage 时是否本地估算补齐；`off` 关闭 |
-| `MIMO_BRIDGE_RESPONSE_TTL_MS` | `1800000` | Responses 状态保留时间 |
-| `MIMO_BRIDGE_RESPONSE_STATE_MAX` | `200` | 内存中最多保存的 Responses 数量 |
+| `MIMO_BRIDGE_RESPONSE_TTL_MS` | `1800000` | `store=false` 的闲置状态保留时间 |
+| `MIMO_BRIDGE_RESPONSE_STATE_MAX` | `5000` | Responses 状态上限；活动和 `store=true` 不会被淘汰 |
 | `MIMO_BRIDGE_ALLOWED_HOSTS` | 空 | 额外允许的 `Host` 头，逗号分隔 |
 | `MIMO_BRIDGE_ALLOW_ANY_HOST` | `0` | 设为 `1` 关闭 Host 校验（不推荐） |
 | `BRIDGE_DEBUG` | `0` | 写入脱敏请求元数据 |
 | `BRIDGE_DEBUG_INCLUDE_BODY` | `0` | 显式开启后才记录请求体 |
 
-## 使用 cc-switch（可选）
+## 使用 cc-switch（推荐）
 
 在 cc-switch 中添加供应商：
 
@@ -387,21 +401,24 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 - Base URL：`http://127.0.0.1:8788/v1`
 - Key：`bridge-secret.txt` 中的值
 - 配置：粘贴 `cc-switch-provider.toml`
+- 模型：由用户在 cc-switch / Codex 中自行选择
 
-配置里有两处是必须的，漏掉就会出问题：
+bridge 模板只负责连接：
 
 1. `web_search = "disabled"`
    Codex 默认会在 Responses 请求的 tools 里带上 web_search，MiMo 引擎没有这个能力。
    bridge 现在会丢弃这类 hosted 工具而不是报错，但显式关掉更干净，也少一次无效请求。
-2. `model_catalog_json`
-   cc-switch 生成的 cc-switch-model-catalog.json 里通常只有当前供应商的模型，
-   切到 mimo 后选择器里看不到 xiaomi/*，Codex 还会警告 Model metadata not found。补一下目录：
+2. `model_providers.mimo`
+   Base URL、wire API 和 bridge secret 必须正确。
+
+`model`、`model_catalog_json` 不写在模板里，避免 bridge 与 cc-switch 争抢模型配置。
+如果你的模型目录缺少 MiMo 条目，可以自行选择是否运行：
 
    ```powershell
    node add-model-catalog.mjs --catalog mimo-models.json
    ```
 
-   脚本会自动备份。注意不要指向 cc-switch-model-catalog.json：cc-switch 每次切换供应商都会重写它，xiaomi 条目会被冲掉（实测过）。用独立的 mimo-models.json 只需生成一次。
+   脚本会自动备份，并把 MiMo 模型标为 `text + image`。这是可选工具，不会被启动脚本自动执行。
 
 ## 文件结构
 
@@ -409,32 +426,36 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 | --- | --- |
 | `bridge.mjs` | 协议桥接、认证、端口发现、流式代理、熔断 |
 | `responses.mjs` | Responses ⇄ Chat Completions 转换与 SSE 解析 |
-| `protocol-state.mjs` | Responses 状态、TTL、取消和淘汰管理 |
+| `protocol-state.mjs` | Responses 状态持久化、TTL、取消和淘汰管理 |
 | `runtime.mjs` | 指标、并发限制、错误分类与熔断器 |
 | `token-estimate.mjs` | 上游缺失 usage 时的本地 token 估算器 |
 | `mint-token.mjs` | 生成凭据、写入 MiMo token 存储、设置 ACL |
 | `doctor.mjs` | bridge、MiMo 与 Codex 配置诊断 |
-| `mimo-bridge.ps1` | 统一管理、诊断、轮换与自启动入口 |
-| `start-bridge.bat` / `启动 MiMo 桥.bat` | 可双击启动，失败会停住并显示日志 |
-| `apply-mimo-provider.ps1` | 更新 Codex provider 配置 |
+| `mimo-bridge.ps1` | 统一管理、诊断、可选配置与自启动入口 |
+| `启动 MiMo 桥.bat` | 唯一推荐的双击入口；只搭桥，不选模型 |
+| `apply-mimo-provider.ps1` | 可选的 Codex provider 直写 / 恢复工具 |
+| `cc-switch-provider.toml` | cc-switch 连接模板；模型由用户配置 |
 | `test/` | 不依赖真实模型的自动测试 |
 | `live-checks/codex-tool.mjs` | 可选的真实 Codex 工具调用测试 |
 | `live-checks/protocol-live.mjs` | 真实 MiMo Responses 协议能力测试 |
 
 ## 当前限制
 
+- bridge 管理的是 Responses 请求，不管理 Codex Desktop 的会话生命周期。
+  本地日志里观察到的 `turn_aborted` 均为 `reason=interrupted`；若在模型仍输出时继续发消息，
+  `followUpQueueMode = "steer"` 会打断当前轮并开启新轮，这与 bridge 的响应失败不同。
 - MiMo Desktop 升级会改模型 ID：26.922 起 `xiaomi/mimo-*` 旧 ID 全部下线，
   引擎列表里的 `xiaomi/*` 新 ID（v2.5/v2.6）走云端、需要小米 API Key，桌面订阅调不通；
   可用的是 `mimo-desktop/*`。桥的兜底逻辑（前台与后台响应都会走）会自动在引擎现有
   模型里挑一个可用的，但也建议同步更新配置和目录里的模型名。
   用 node live-checks/native-responses-probe.mjs 或直接看 http://127.0.0.1:8788/v1/models 可以确认当前 ID。
 - 端口自动发现目前只支持 Windows。
-- Responses 状态是 bridge 进程内的临时状态；重启 bridge 后旧 `previous_response_id` 会失效。
+- `store=true` 的 Responses 状态已持久化；`store=false` 只在 TTL 内保留。
 - MiMo 不返回原生 token logprobs 时，bridge 会接受并兼容该请求，但不会伪造日志概率数据。
 - MiMo 不提供 OpenAI hosted tools、prompt registry 或完整内部 reasoning 状态；这些能力会返回明确的协议错误。
 - reasoning 会转换成 Responses summary，但不会还原 MiMo 的完整内部推理状态。
-- 上游没有返回 usage 时，bridge 会用本地启发式估算器补齐 token 数（非精确值，数量级参考）；`MIMO_BRIDGE_TOKEN_ESTIMATE=off` 可关闭，关闭后 Codex 可能显示 `tokens used 0`。
-- 多模态内容会尽可能保留并交给上游，实际支持情况取决于 MiMo 模型版本。
+- 流式上下文统计优先使用 MiMo 真实 usage。只有上游没有 usage 时才使用 tokenx + 图片尺寸估算，仍是近似值。
+- 图片 token 无法在本地精确复现 MiMo 的视觉编码器；估算按 512px 分块保守计数，真实 usage 返回后会覆盖估算。
 - Codex 默认下发的 hosted 工具（web_search / file_search / code_interpreter 等）会被 bridge 丢弃而不是报错，因为 MiMo 引擎没有对应能力；真正未知的工具类型仍然返回明确的协议错误。
 - 不要把 bridge 监听地址改成 `0.0.0.0`，否则本地凭据和模型请求会暴露到网络。
 - bridge 默认校验 `Host` 头，只接受 `127.0.0.1` / `localhost` / `[::1]`。若经反向代理访问，请用 `MIMO_BRIDGE_ALLOWED_HOSTS` 放行对应 Host。

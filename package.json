@@ -1,12 +1,12 @@
 {
   "name": "mimo-codex-bridge",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "private": true,
   "type": "module",
   "description": "Local MiMo Desktop to Codex protocol bridge",
   "scripts": {
     "start": "node bridge.mjs",
-    "check": "node --check bridge.mjs && node --check responses.mjs && node --check runtime.mjs && node --check mint-token.mjs && node --check doctor.mjs && node --check live-checks/codex-tool.mjs && node --check live-checks/codex-tools-demo.mjs && node --check live-checks/protocol-live.mjs && node --check live-checks/native-responses-probe.mjs && node --check protocol-state.mjs && node --check cleanup-buckets.mjs",
+    "check": "node --check bridge.mjs && node --check responses.mjs && node --check runtime.mjs && node --check token-estimate.mjs && node --check mint-token.mjs && node --check doctor.mjs && node --check live-checks/codex-tool.mjs && node --check live-checks/codex-tools-demo.mjs && node --check live-checks/protocol-live.mjs && node --check live-checks/native-responses-probe.mjs && node --check protocol-state.mjs && node --check cleanup-buckets.mjs",
     "test": "node --test",
     "doctor": "node doctor.mjs",
     "test:live": "node live-checks/codex-tool.mjs",
@@ -16,5 +16,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "tokenx": "2.1.0"
   }
 }

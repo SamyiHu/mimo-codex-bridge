@@ -30,12 +30,12 @@ const headers = {
   "Content-Type": "application/json",
 };
 const responsesBody = JSON.stringify({
-  model: process.env.MIMO_PROBE_MODEL || "mimo-desktop/mimo-pro",
+  model: process.env.MIMO_PROBE_MODEL || "mimo-desktop/mimo-v2.6-pro",
   input: "Reply with RESPONSES-NATIVE-OK only.",
   stream: false,
 });
 const chatBody = JSON.stringify({
-  model: process.env.MIMO_PROBE_MODEL || "mimo-desktop/mimo-pro",
+  model: process.env.MIMO_PROBE_MODEL || "mimo-desktop/mimo-v2.6-pro",
   messages: [
     { role: "user", content: "Reply with CHAT-OK only." },
   ],

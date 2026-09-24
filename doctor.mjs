@@ -144,9 +144,12 @@ if (status?.engine && mimoToken) {
     check(
       "mimo_engine_models",
       result.response.ok &&
-        models.some((model) => model.startsWith("xiaomi/")),
+      models.some(
+        (model) =>
+          model.startsWith("mimo-desktop/") || model.startsWith("xiaomi/"),
+      ),
       result.response.ok
-        ? `${models.length} model(s); xiaomi models detected=${models.some((model) => model.startsWith("xiaomi/"))}`
+        ? `${models.length} model(s); MiMo desktop models detected=${models.some((model) => model.startsWith("mimo-desktop/"))}`
         : `HTTP ${result.response.status}`,
     );
   } catch (error) {
@@ -160,7 +163,7 @@ if (status?.engine && mimoToken) {
   );
 }
 
-let configModel = "mimo-desktop/mimo-pro";
+let configModel = "mimo-desktop/mimo-v2.6-pro";
 if (fs.existsSync(configPath)) {
   const config = fs.readFileSync(configPath, "utf8");
   const provider = extractTomlString(config, "model_provider");

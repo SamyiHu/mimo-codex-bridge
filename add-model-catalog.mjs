@@ -2,8 +2,8 @@
 //
 // 背景：config.toml 里的 model_catalog_json 指向的目录只有别的供应商的模型，
 // 所以选择器里看不到 mimo-desktop/*；Codex 还会警告 "Model metadata not found"。
-// 档位来自实测（26.922）：mimo-desktop/* 对话模型都接受 reasoning_effort
-// （low/medium/high）。引擎列表里的 xiaomi/* 走云端、需要小米 API Key，
+// 档位来自实测（26.922 / 2.6）：Pro 接受 low/medium/high，Flash 不接受
+// reasoning_effort。引擎列表里的 xiaomi/* 走云端、需要小米 API Key，
 // 桌面订阅 token 调不通，因此不收录。
 //
 // 用法：node add-model-catalog.mjs [--config <config.toml>] [--dry-run]
@@ -59,32 +59,32 @@ const BASIC_LEVELS = [
 
 const definitions = [
   {
-    slug: "mimo-desktop/mimo-pro",
-    display_name: "MiMo Pro",
-    description: "Xiaomi MiMo Pro via MiMo Desktop bridge",
-    priority: 1010,
-    reasoning: BASIC_LEVELS,
-  },
-  {
     slug: "mimo-desktop/mimo-v2.6-pro",
     display_name: "MiMo v2.6 Pro",
     description: "Xiaomi MiMo v2.6 Pro via MiMo Desktop bridge",
-    priority: 1009,
+    priority: 1010,
     reasoning: BASIC_LEVELS,
   },
   {
     slug: "mimo-desktop/mimo-v2.6-flash",
     display_name: "MiMo v2.6 Flash",
     description: "Xiaomi MiMo v2.6 Flash via MiMo Desktop bridge",
+    priority: 1009,
+    reasoning: [],
+  },
+  {
+    slug: "mimo-desktop/mimo-pro",
+    display_name: "MiMo Pro",
+    description: "Alias of current MiMo Pro via MiMo Desktop bridge",
     priority: 1008,
     reasoning: BASIC_LEVELS,
   },
   {
     slug: "mimo-desktop/mimo-flash",
     display_name: "MiMo Flash",
-    description: "Xiaomi MiMo Flash via MiMo Desktop bridge",
+    description: "Alias of current MiMo Flash via MiMo Desktop bridge",
     priority: 1007,
-    reasoning: BASIC_LEVELS,
+    reasoning: [],
   },
   {
     slug: "mimo-desktop/mimo-auto",
@@ -108,10 +108,12 @@ for (const def of definitions) {
     max_context_window: 1000000,
     effective_context_window_percent: 95,
     supported_reasoning_levels: def.reasoning,
-    default_reasoning_level: def.reasoning.length ? "high" : template.default_reasoning_level,
+    default_reasoning_level: def.reasoning.length ? "high" : null,
     supports_reasoning_summaries: def.reasoning.length > 0,
     supports_parallel_tool_calls: false,
-    input_modalities: ["text"],
+    input_modalities: ["text", "image"],
+    output_modalities: ["text"],
+    supports_image_detail_original: true,
     visibility: "list",
   });
   const index = catalog.models.findIndex((m) => m.slug === def.slug);

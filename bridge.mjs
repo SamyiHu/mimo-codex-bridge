@@ -75,7 +75,7 @@ const MODEL_PREFIX = argOf(
 );
 const MODEL_FALLBACK = argOf(
   "--model-fallback",
-  process.env.MIMO_BRIDGE_MODEL_FALLBACK || "mimo-desktop/mimo-pro",
+  process.env.MIMO_BRIDGE_MODEL_FALLBACK || "mimo-desktop/mimo-v2.6-pro",
 );
 // 上游不返回 usage 时是否用本地估算器补齐（MIMO_BRIDGE_TOKEN_ESTIMATE=off 关闭）。
 const TOKEN_ESTIMATE_ENABLED = !/^(0|off|false)$/i.test(
@@ -112,8 +112,8 @@ const RESPONSE_STATE_TTL_MS = intFrom(
   30 * 60 * 1000,
 );
 const RESPONSE_STATE_MAX = intFrom(
-  process.env.MIMO_BRIDGE_RESPONSE_STATE_MAX || 200,
-  200,
+  process.env.MIMO_BRIDGE_RESPONSE_STATE_MAX || 5000,
+  5000,
 );
 const DEBUG = process.env.BRIDGE_DEBUG === "1";
 
@@ -200,6 +200,7 @@ const BRIDGE_AUTH_MODE = bridgeAuth.mode;
 const responseStore = new ResponseStore({
   ttlMs: RESPONSE_STATE_TTL_MS,
   maxEntries: RESPONSE_STATE_MAX,
+  stateFile: path.join(INSTANCE_DIR, "responses-state.json"),
 });
 
 const metrics = new MetricsRegistry({
@@ -531,8 +532,9 @@ async function fetchKnownModels(base) {
 // 这样 MiMo Desktop 下次升级改名也不会再把请求打到不存在的模型上。
 const FALLBACK_CANDIDATES = [
   MODEL_FALLBACK,
-  "mimo-desktop/mimo-pro",
   "mimo-desktop/mimo-v2.6-pro",
+  "mimo-desktop/mimo-v2.6-flash",
+  "mimo-desktop/mimo-pro",
   "mimo-desktop/mimo-flash",
   "mimo-desktop/mimo-auto",
 ];
@@ -906,6 +908,7 @@ async function handleApiRequest(req, res, metricState = null) {
           max_concurrent_requests: MAX_CONCURRENT_REQUESTS,
           response_state_ttl_ms: RESPONSE_STATE_TTL_MS,
           response_state_max: RESPONSE_STATE_MAX,
+          response_state_file: responseStore.stateFile,
         },
         protocol: {
           responses_state: true,
@@ -1101,6 +1104,14 @@ async function handleApiRequest(req, res, metricState = null) {
     }
 
     chatBody.stream = body.stream === true;
+    if (chatBody.stream) {
+      // MiMo 只有收到 include_usage 时才在最后一个 SSE chunk 返回真实
+      // prompt/completion token。Codex 的上下文与自动压缩依赖这个值。
+      chatBody.stream_options = {
+        ...(chatBody.stream_options || {}),
+        include_usage: true,
+      };
+    }
   }
 
   const clientAbort = new AbortController();

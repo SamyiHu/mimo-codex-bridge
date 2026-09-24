@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { ResponseStore } from "../protocol-state.mjs";
 
@@ -34,17 +37,38 @@ test("response store keeps the cancellation controller across re-puts", () => {
   assert.equal(controller.signal.aborted, true, "删除应中断仍在进行的响应");
 });
 
-test("response store expires a single entry without a full sweep", () => {
+test("response store expires idle state but never interrupts an active response", () => {
   const store = new ResponseStore({ ttlMs: 10, maxEntries: 10 });
-  store.put("resp_ttl", { id: "resp_ttl", status: "in_progress" });
-  assert.equal(store.get("resp_ttl").status, "in_progress");
+  store.put("resp_ttl", { id: "resp_ttl", status: "completed" });
+  store.put("resp_active", { id: "resp_active", status: "in_progress" });
 
   return new Promise((resolve) => {
     setTimeout(() => {
-      // 即使全量清扫被节流跳过，单条查询也必须按 TTL 失效。
       assert.equal(store.get("resp_ttl"), null);
-      assert.equal(store.snapshot().entries, 0);
+      assert.equal(store.get("resp_active").status, "in_progress");
+      assert.equal(store.snapshot().entries, 1);
       resolve();
     }, 30);
   });
+});
+
+test("store=true response state survives process reload", () => {
+  const directory = path.join(os.tmpdir(), `mimo-response-state-${process.pid}`);
+  const stateFile = path.join(directory, "responses-state.json");
+  fs.mkdirSync(directory, { recursive: true });
+  try {
+    const store = new ResponseStore({ ttlMs: 1, stateFile });
+    store.put("resp_persistent", {
+      id: "resp_persistent",
+      status: "completed",
+      store: true,
+      output: [{ type: "message" }],
+    });
+
+    const restored = new ResponseStore({ ttlMs: 1, stateFile });
+    assert.equal(restored.get("resp_persistent").store, true);
+  } finally {
+    if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
+    fs.rmdirSync(directory);
+  }
 });

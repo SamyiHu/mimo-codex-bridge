@@ -72,7 +72,7 @@ function runCodex() {
 
   const script =
     "& codex exec --json --skip-git-repo-check --sandbox workspace-write " +
-    "-c model_provider=mimo -c model=mimo-desktop/mimo-pro -c model_reasoning_effort=high " +
+    "-c model_provider=mimo -c model=mimo-desktop/mimo-v2.6-pro -c model_reasoning_effort=high " +
     `'${prompt}'`;
 
   return new Promise((resolve) => {
@@ -187,7 +187,7 @@ try {
   const verification = {
     ok: true,
     provider: "mimo",
-    model: "mimo-desktop/mimo-pro",
+    model: "mimo-desktop/mimo-v2.6-pro",
     structured_tool_events: toolEvents.length,
     distinct_completed_commands: distinctCommands.size,
     files_verified: outputFiles.map((file) => path.basename(file)),

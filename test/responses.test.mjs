@@ -91,6 +91,103 @@ test("converts Responses tools, tool_choice and multimodal input", () => {
   assert.equal(chat.messages[4].role, "tool");
 });
 
+test("keeps multimodal tool output out of JSON tool text", () => {
+  const imageUrl = "data:image/png;base64,not-a-real-image";
+  const chat = toChatRequest({
+    model: "mimo-pro",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_image",
+        name: "view_image",
+        arguments: '{"path":"shot.png"}',
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_image",
+        output: [
+          { type: "input_text", text: "captured screenshot" },
+          { type: "input_image", image_url: imageUrl, detail: "high" },
+        ],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "What color is shown?" }],
+      },
+    ],
+  });
+
+  assert.equal(chat.messages.length, 4);
+  assert.equal(chat.messages[0].role, "assistant");
+  assert.equal(chat.messages[1].role, "tool");
+  assert.match(chat.messages[1].content, /captured screenshot/);
+  assert.match(chat.messages[1].content, /1 media item/);
+  assert.doesNotMatch(chat.messages[1].content, /not-a-real-image/);
+
+  assert.equal(chat.messages[2].role, "user");
+  assert.deepEqual(chat.messages[2].content, [
+    {
+      type: "text",
+      text: "The following media items were returned by completed tool calls.",
+    },
+    {
+      type: "image_url",
+      image_url: { url: imageUrl, detail: "high" },
+    },
+  ]);
+  assert.equal(chat.messages[3].role, "user");
+});
+
+test("keeps parallel tool messages contiguous before multimodal attachments", () => {
+  const chat = toChatRequest({
+    model: "mimo-pro",
+    input: [
+      {
+        type: "function_call",
+        call_id: "call_text",
+        name: "read",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        call_id: "call_image",
+        name: "view_image",
+        arguments: "{}",
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_text",
+        output: "plain result",
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_image",
+        output: [
+          {
+            type: "input_image",
+            image_url: "data:image/png;base64,parallel-image",
+          },
+        ],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Continue" }],
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    chat.messages.map((message) => message.role),
+    ["assistant", "tool", "tool", "user", "user"],
+  );
+  assert.equal(chat.messages[1].tool_call_id, "call_text");
+  assert.equal(chat.messages[2].tool_call_id, "call_image");
+  assert.doesNotMatch(chat.messages[2].content, /parallel-image/);
+  assert.equal(chat.messages[3].content[1].type, "image_url");
+});
+
 test("converts non-streaming Chat Completion to Responses object", () => {
   const response = toResponseObject(
     {

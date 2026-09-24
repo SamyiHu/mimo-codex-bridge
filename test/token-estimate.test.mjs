@@ -16,16 +16,21 @@ import { createResponseStreamTranslator } from "../responses.mjs";
 
 const projectDir = path.resolve(import.meta.dirname, "..");
 
-test("estimateTextTokens: CJK 按字计，其他文本按 4 字符/token", () => {
+test("estimateTextTokens: 使用多语言 token 估算", () => {
   assert.equal(estimateTextTokens("你好世界"), 4);
-  assert.equal(estimateTextTokens("hello world"), Math.ceil(11 / 4));
-  assert.equal(estimateTextTokens("你好abc"), 2 + Math.ceil(3 / 4));
+  assert.equal(estimateTextTokens("hello world"), 2);
+  assert.ok(estimateTextTokens("你好abc") >= 4);
   assert.equal(estimateTextTokens(""), 0);
   assert.equal(estimateTextTokens(null), 0);
   assert.equal(estimateTextTokens(undefined), 0);
 });
 
-test("estimateChatRequestTokens: messages、多模态 parts 与 tools 都计入", () => {
+test("estimateChatRequestTokens: messages、图片、文件与 tools 都计入", () => {
+  const png = Buffer.alloc(24);
+  png.write("PNG", 1, "ascii");
+  png.writeUInt32BE(1024, 16);
+  png.writeUInt32BE(512, 20);
+  const imageUrl = `data:image/png;base64,${png.toString("base64")}`;
   const body = {
     messages: [
       { role: "system", content: "你是一个助手" },
@@ -33,7 +38,7 @@ test("estimateChatRequestTokens: messages、多模态 parts 与 tools 都计入"
         role: "user",
         content: [
           { type: "text", text: "看看这张图" },
-          { type: "image_url", image_url: { url: "data:..." } },
+          { type: "image_url", image_url: { url: imageUrl } },
         ],
       },
       {
@@ -67,12 +72,17 @@ test("estimateChatRequestTokens: messages、多模态 parts 与 tools 都计入"
   });
   assert.ok(textOnly > 0);
   assert.ok(tokens > textOnly);
-  // 图片 data URL 无法估算，不应被当作文本计入
   const withoutImage = estimateChatRequestTokens({
     ...body,
-    messages: body.messages.filter((m) => m.role !== "user"),
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "text", text: "看看这张图" }],
+      },
+      ...body.messages.filter((m) => m.role !== "user"),
+    ],
   });
-  assert.ok(withoutImage > 0);
+  assert.ok(tokens - withoutImage >= 255, "图片必须计入 token 估算");
 });
 
 test("estimateChatResponseTokens 与 estimateResponsesOutputTokens 覆盖主要输出形态", () => {

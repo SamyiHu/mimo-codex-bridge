@@ -1,8 +1,11 @@
 ﻿<#
   mimo-bridge.ps1 — 本地管理入口。
   用法：
+    .\mimo-bridge.ps1 setup
     .\mimo-bridge.ps1 status
     .\mimo-bridge.ps1 start|stop|restart
+    .\mimo-bridge.ps1 configure-codex
+    .\mimo-bridge.ps1 restore-codex
     .\mimo-bridge.ps1 doctor
     .\mimo-bridge.ps1 logs
     .\mimo-bridge.ps1 rotate-secret
@@ -17,6 +20,8 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet(
+        "setup",
+        "help",
         "status",
         "metrics",
         "start",
@@ -29,6 +34,9 @@ param(
         "tools-demo",
         "protocol-live",
         "native-probe",
+        "configure-codex",
+        "restore-codex",
+        "repair-token",
         "install-startup",
         "remove-startup"
     )]
@@ -68,11 +76,13 @@ function Wait-IfInteractive {
 
 function Show-Usage {
     Write-Host "mimo-bridge.ps1 用法：" -ForegroundColor Cyan
+    Write-Host "  .\mimo-bridge.ps1 setup     仅初始化凭据并启动 bridge（推荐）"
     Write-Host "  .\mimo-bridge.ps1 start     启动 bridge"
     Write-Host "  .\mimo-bridge.ps1 status    查看状态"
     Write-Host "  .\mimo-bridge.ps1 doctor    自动诊断"
     Write-Host "  .\mimo-bridge.ps1 stop      停止 bridge"
-    Write-Host "  双击仓库里的「启动 MiMo 桥.bat」也可以启动，并会保留错误信息。"
+    Write-Host "  .\mimo-bridge.ps1 configure-codex  可选：只写 Codex provider"
+    Write-Host "  双击「启动 MiMo 桥.bat」等价于 setup。模型继续由 cc-switch / 用户配置。"
 }
 
 function Get-BridgeSecret {
@@ -116,6 +126,36 @@ if (-not $bound) {
 
 try {
     switch ($Command) {
+        "setup" {
+            Write-Host "初始化 MiMo bridge 凭据（不会修改 Codex 模型配置）..." -ForegroundColor Cyan
+            & node (Join-Path $dir "mint-token.mjs")
+            if ($LASTEXITCODE -ne 0) { throw "mint-token 失败，ExitCode=$LASTEXITCODE" }
+            & $startScript -Port $Port
+            Start-Sleep -Milliseconds 300
+            Show-BridgeStatus
+            Write-Host ""
+            Write-Host "bridge 已就绪。Codex 的 model / 模型目录仍由 cc-switch 或用户自行配置。" -ForegroundColor Green
+            Write-Host "如需直接写入 provider（不改 model），运行：.\mimo-bridge.ps1 configure-codex" -ForegroundColor DarkGray
+        }
+
+        "configure-codex" {
+            & (Join-Path $dir "apply-mimo-provider.ps1") -SecretFile $secretFile
+            if ($LASTEXITCODE -ne 0) { throw "apply-mimo-provider 失败，ExitCode=$LASTEXITCODE" }
+        }
+
+        "restore-codex" {
+            & (Join-Path $dir "apply-mimo-provider.ps1") -Restore
+            if ($LASTEXITCODE -ne 0) { throw "恢复 Codex 配置失败，ExitCode=$LASTEXITCODE" }
+        }
+
+        "repair-token" {
+            & node (Join-Path $dir "mint-token.mjs")
+            if ($LASTEXITCODE -ne 0) { throw "mint-token 失败，ExitCode=$LASTEXITCODE" }
+            & $stopScript -Port $Port
+            & $startScript -Port $Port
+            Show-BridgeStatus
+        }
+
         "status" {
             Show-BridgeStatus
         }
