@@ -663,6 +663,120 @@ async function fetchUpstream(
   });
 }
 
+
+function contentToText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        typeof part === "string"
+          ? part
+          : String(part?.text ?? part?.content ?? ""),
+      )
+      .join("\n");
+  }
+  return "";
+}
+
+function responseToText(response) {
+  return (response?.output ?? [])
+    .filter((item) => item.type === "message")
+    .flatMap((item) => item.content ?? [])
+    .filter((part) => part.type === "output_text" || part.type === "refusal")
+    .map((part) => String(part.text ?? part.refusal ?? ""))
+    .join("\n");
+}
+
+function responseHasToolCall(response) {
+  return (response?.output ?? []).some(
+    (item) =>
+      item.type === "function_call" || item.type === "custom_tool_call",
+  );
+}
+
+function actionRequestText(chatBody) {
+  const messages = chatBody?.messages ?? [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") {
+      return contentToText(messages[index].content);
+    }
+  }
+  return "";
+}
+
+function looksLikeActionRequest(text) {
+  return (
+    /\b(commit|push|run|execute|fix|build|test|install|create|update|delete|restart|start|stop|apply|merge|rebase|deploy|open|launch|configure|generate)\b/i.test(
+      text,
+    ) ||
+    /[提交推送运行执行修复构建测试安装创建更新删除重启启动停止应用合并部署打开启动配置生成]/.test(
+      text,
+    )
+  );
+}
+
+function looksLikeActionIntent(text) {
+  return (
+    /(?:我会|我将|接下来|下一步|马上|现在|先|然后).{0,80}(?:执行|运行|检查|提交|推送|修复|创建|更新|删除|重启|启动|停止|应用|合并|部署|补回|回归|验证|整理|清理|纳入)/i.test(
+      text,
+    ) ||
+    /\b(?:i will|i'll|next(?:,|:)?|let me|going to)\b.{0,100}\b(?:run|execute|commit|push|fix|build|test|install|create|update|delete|restart|start|stop|apply|merge|deploy|verify|clean|organize|include|finish)\b/i.test(
+      text,
+    )
+  );
+}
+
+function shouldGuardToolCall(requestBody, chatBody, response) {
+  return (
+    (requestBody?.tools?.length || chatBody?.tools?.length) > 0 &&
+    looksLikeActionRequest(actionRequestText(chatBody)) &&
+    !responseHasToolCall(response) &&
+    looksLikeActionIntent(responseToText(response))
+  );
+}
+
+function buildToolRetryChatBody(chatBody, response) {
+  const messages = [...(chatBody?.messages ?? [])];
+  const text = responseToText(response);
+  if (text) messages.push({ role: "assistant", content: text });
+  messages.push({
+    role: "system",
+    content:
+      "The previous assistant response described an immediate action but did not call a tool. " +
+      "Continue the task now by calling one of the provided tools. " +
+      "Do not respond with a plan-only message.",
+  });
+  return {
+    ...chatBody,
+    messages,
+    tool_choice: "required",
+    stream: false,
+    stream_options: undefined,
+  };
+}
+
+async function fetchToolRetryPayload({
+  target,
+  chatBody,
+  response,
+  requestId,
+  abortContext,
+}) {
+  const retryBody = buildToolRetryChatBody(chatBody, response);
+  const upstream = await fetchUpstream(
+    target,
+    {
+      method: "POST",
+      body: JSON.stringify(retryBody),
+    },
+    abortContext,
+    requestId,
+    "application/json",
+  );
+  if (!upstream.ok) return null;
+  return upstream.json().catch(() => null);
+}
+
 async function proxyResponsesStream({
   req,
   res,
@@ -673,6 +787,7 @@ async function proxyResponsesStream({
   abortContext,
   cancellation,
   metricState,
+  upstreamTarget,
 }) {
   const contentType = upstream.headers.get("content-type") || "";
 
@@ -705,12 +820,21 @@ async function proxyResponsesStream({
     "X-Request-ID": requestId,
   });
 
+  const guardActionResponse =
+    (requestBody?.tools?.length || chatBody?.tools?.length) > 0 &&
+    looksLikeActionRequest(actionRequestText(chatBody));
+  const deferredEvents = [];
+  const emitEvent = async (evt) => {
+    if (guardActionResponse) deferredEvents.push(evt);
+    else await sseWrite(res, evt);
+  };
+
   const translator = createResponseStreamTranslator(requestBody, {
     estimatedInputTokens: TOKEN_ESTIMATE_ENABLED
       ? estimateChatRequestTokens(chatBody)
       : 0,
   });
-  for (const evt of translator.start()) await sseWrite(res, evt);
+  for (const evt of translator.start()) await emitEvent(evt);
 
   // 响应 ID 在 response.created 里已经交给客户端，此时就可以登记，
   // 让 POST /v1/responses/{id}/cancel 有事可做。
@@ -761,7 +885,7 @@ async function proxyResponsesStream({
             Date.now() - metricState.startedAt,
           );
         }
-        for (const evt of translated) await sseWrite(res, evt);
+        for (const evt of translated) await emitEvent(evt);
       }
     }
     parser.end();
@@ -775,18 +899,55 @@ async function proxyResponsesStream({
         }
       })
       .find((item) => item?.type === "response.completed");
-    if (completed?.response) {
-      normalizeStructuredResponse(completed.response, requestBody);
-      rememberResponse(completed.response);
+    const finalResponse = completed?.response ?? translator.currentResponse();
+    if (
+      guardActionResponse &&
+      shouldGuardToolCall(requestBody, chatBody, finalResponse)
+    ) {
+      debugLog({
+        requestId,
+        event: "tool_call_guard_triggered",
+        text: responseToText(finalResponse).slice(0, 500),
+      });
+      const retryPayload = await fetchToolRetryPayload({
+        target: upstreamTarget,
+        chatBody,
+        response: finalResponse,
+        requestId,
+        abortContext,
+      });
+      if (retryPayload) {
+        const retryResponse = toResponseObject(retryPayload, requestBody);
+        retryResponse.id = finalResponse.id;
+        normalizeStructuredResponse(retryResponse, requestBody);
+        rememberResponse(retryResponse, cancellation);
+        if (retryResponse.usage?.total_tokens) {
+          metrics.observeUsage(retryResponse.usage);
+        }
+        for (const evt of responseEvents(retryResponse)) {
+          await sseWrite(res, evt);
+        }
+        res.end();
+        return;
+      }
+      debugLog({
+        requestId,
+        event: "tool_call_guard_retry_failed",
+      });
     }
-    if (completed?.response) {
+
+    if (finalResponse) {
+      normalizeStructuredResponse(finalResponse, requestBody);
+      rememberResponse(finalResponse, cancellation);
       if (translator.usageEstimated()) {
-        metrics.observeEstimatedUsage(completed.response.usage);
+        metrics.observeEstimatedUsage(finalResponse.usage);
       } else {
-        metrics.observeUsage(completed.response.usage);
+        metrics.observeUsage(finalResponse.usage);
       }
     }
-    for (const evt of completedEvents) await sseWrite(res, evt);
+    for (const evt of [...deferredEvents, ...completedEvents]) {
+      await sseWrite(res, evt);
+    }
     res.end();
   } catch (error) {
     debugLog({
@@ -1272,9 +1433,10 @@ async function handleApiRequest(req, res, metricState = null) {
             abortContext,
             cancellation,
             metricState,
+            upstreamTarget: target,
           });
         } else {
-          const payload = await upstream.json().catch(() => null);
+          let payload = await upstream.json().catch(() => null);
           if (!payload) {
             metrics.breaker.recordFailure();
             metrics.observeError("invalid_upstream_response");
@@ -1287,11 +1449,32 @@ async function handleApiRequest(req, res, metricState = null) {
               "invalid_upstream_response",
             );
           }
-          const response = rememberResponse(
-            normalizeStructuredResponse(
-              toResponseObject(payload, body),
-              body,
-            ),
+          let response = toResponseObject(payload, body);
+          if (shouldGuardToolCall(body, chatBody, response)) {
+            debugLog({
+              requestId,
+              event: "tool_call_guard_triggered",
+              text: responseToText(response).slice(0, 500),
+            });
+            const retryPayload = await fetchToolRetryPayload({
+              target,
+              chatBody,
+              response,
+              requestId,
+              abortContext,
+            });
+            if (retryPayload) {
+              payload = retryPayload;
+              response = toResponseObject(payload, body);
+            } else {
+              debugLog({
+                requestId,
+                event: "tool_call_guard_retry_failed",
+              });
+            }
+          }
+          response = rememberResponse(
+            normalizeStructuredResponse(response, body),
           );
           applyEstimatedUsage(response, chatBody, payload);
           metrics.observeFirstToken(
