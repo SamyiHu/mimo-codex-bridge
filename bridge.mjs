@@ -564,6 +564,25 @@ async function applyModelFallback(base, chatBody) {
   );
 }
 
+// 引擎 400「不支持 reasoning_effort」的适配若每个请求都重新试一遍，
+// 每次都白付一个往返（26.922 后期引擎更新后 v2.6 系列不再接受该参数，
+// 实测每个请求都触发）。按模型记住拒绝结论；TTL 兜底，引擎升级后
+// 能力可能恢复。
+const EFFORT_REJECTION_TTL_MS = 10 * 60 * 1000;
+const effortRejectionByModel = new Map();
+
+function stripRejectedReasoningEffort(chatBody) {
+  if (!chatBody || !Object.hasOwn(chatBody, "reasoning_effort")) return;
+  const memo = effortRejectionByModel.get(chatBody.model);
+  if (memo && Date.now() - memo.at < EFFORT_REJECTION_TTL_MS) {
+    delete chatBody.reasoning_effort;
+    debugLog({
+      event: "reasoning_effort_stripped_from_memo",
+      model: chatBody.model,
+    });
+  }
+}
+
 /**
  * 上游没给 usage 时的本地估算（启发式，非精确值）。
  * 返回标准 usage 形状；无法估算或功能关闭时返回 null。
@@ -1148,6 +1167,7 @@ async function handleApiRequest(req, res, metricState = null) {
     }
 
     await applyModelFallback(base, chatBody);
+    stripRejectedReasoningEffort(chatBody);
     const target = upstreamUrl(base, upstreamPath);
     const upstreamRequestStartedAt = Date.now();
     try {
@@ -1188,8 +1208,9 @@ async function handleApiRequest(req, res, metricState = null) {
             const probeMessage = String(probe?.error?.message ?? "");
             let adapted = false;
             if (/does not support reasoning_effort/i.test(probeMessage)) {
-              // 这个模型完全不接受该参数（例如 xiaomi/mimo-x-pro-preview）
+              // 这个模型完全不接受该参数（例如 v2.6 系列）
               delete chatBody.reasoning_effort;
+              effortRejectionByModel.set(chatBody.model, { at: Date.now() });
               adapted = true;
             } else {
               // 只接受部分档位：降级到上游列出的最高档
@@ -1291,8 +1312,9 @@ async function handleApiRequest(req, res, metricState = null) {
             const probeMessage = String(probe?.error?.message ?? "");
             let adapted = false;
             if (/does not support reasoning_effort/i.test(probeMessage)) {
-              // 这个模型完全不接受该参数（例如 xiaomi/mimo-x-pro-preview）
+              // 这个模型完全不接受该参数（例如 v2.6 系列）
               delete chatBody.reasoning_effort;
+              effortRejectionByModel.set(chatBody.model, { at: Date.now() });
               adapted = true;
             } else {
               // 只接受部分档位：降级到上游列出的最高档
@@ -1478,6 +1500,7 @@ async function runBackgroundResponse(body, chatBody, requestId) {
     // 与前台路径对齐：后台请求同样要做模型兜底，否则 MiMo 改模型 ID 后
     // 后台响应会直接打到不存在的模型上。
     await applyModelFallback(base, chatBody);
+    stripRejectedReasoningEffort(chatBody);
 
     const upstream = await fetchUpstream(
       upstreamUrl(base, "/v1/chat/completions"),

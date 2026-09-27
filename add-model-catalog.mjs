@@ -63,7 +63,9 @@ const definitions = [
     display_name: "MiMo v2.6 Pro",
     description: "Xiaomi MiMo v2.6 Pro via MiMo Desktop bridge",
     priority: 1010,
-    reasoning: BASIC_LEVELS,
+    // 2026-09-25 实测：v2.6 系列已不接受 reasoning_effort（400），桥会
+    // 记忆并剥离该参数，目录也标成无档位，Codex 就不会下发。
+    reasoning: [],
   },
   {
     slug: "mimo-desktop/mimo-v2.6-flash",
@@ -75,16 +77,19 @@ const definitions = [
   {
     slug: "mimo-desktop/mimo-pro",
     display_name: "MiMo Pro",
-    description: "Alias of current MiMo Pro via MiMo Desktop bridge",
+    description:
+      "MiMo Pro (stable, supports reasoning effort) via MiMo Desktop bridge",
     priority: 1008,
     reasoning: BASIC_LEVELS,
   },
   {
     slug: "mimo-desktop/mimo-flash",
     display_name: "MiMo Flash",
-    description: "Alias of current MiMo Flash via MiMo Desktop bridge",
+    description:
+      "MiMo Flash (stable, supports reasoning effort) via MiMo Desktop bridge",
     priority: 1007,
-    reasoning: [],
+    // 2026-09-25 实测接受 reasoning_effort=high（v2.6-flash 不接受）。
+    reasoning: BASIC_LEVELS,
   },
   {
     slug: "mimo-desktop/mimo-auto",
