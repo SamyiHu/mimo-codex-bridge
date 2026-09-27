@@ -608,3 +608,145 @@ test("rejects unsupported hosted prompt and tool types explicitly", () => {
     (error) => error.code === "unsupported_tool_type",
   );
 });
+
+
+test("repairs textual tool calls when upstream truncates control-character arguments", () => {
+  const rawCall = [
+    "<", "tool_call>",
+    "<", "function=write_stdin>",
+    "<", "parameter=session_id>98233<", "/parameter>",
+    "<", "parameter=chars>", String.fromCharCode(3), "<", "/parameter>",
+    "<", "parameter=yield_time_ms>1000<", "/parameter>",
+    "<", "parameter=max_output_tokens>5000<", "/parameter>",
+    "<", "/function><", "/tool_call>",
+  ].join("");
+  const request = {
+    model: "mimo-v2.6-pro",
+    tools: [
+      {
+        type: "function",
+        name: "write_stdin",
+        parameters: {
+          type: "object",
+          properties: {
+            session_id: { type: "integer" },
+            chars: { type: "string" },
+            yield_time_ms: { type: "integer" },
+            max_output_tokens: { type: "integer" },
+          },
+          required: ["session_id", "chars"],
+        },
+      },
+    ],
+  };
+
+  const response = toResponseObject(
+    {
+      choices: [
+        {
+          finish_reason: "tool_calls",
+          message: {
+            content: rawCall,
+            tool_calls: [
+              {
+                id: "bad_call",
+                function: {
+                  name: "write_stdin",
+                  arguments: '{"session_id": "98233", "chars": ',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    },
+    request,
+  );
+
+  assert.equal(response.output.some((item) => item.type === "message"), false);
+  const call = response.output.find((item) => item.type === "function_call");
+  assert.equal(call.name, "write_stdin");
+  assert.deepEqual(JSON.parse(call.arguments), {
+    session_id: 98233,
+    chars: "\u0003",
+    yield_time_ms: 1000,
+    max_output_tokens: 5000,
+  });
+});
+
+test("stream translator hides textual tool calls and repairs the final arguments", () => {
+  const rawParts = [
+    "<", "tool_call>",
+    "<", "function=write_stdin>",
+    "<", "parameter=session_id>98233<", "/parameter>",
+    "<", "parameter=chars>", String.fromCharCode(3), "<", "/parameter>",
+    "<", "parameter=yield_time_ms>1000<", "/parameter>",
+    "<", "parameter=max_output_tokens>5000<", "/parameter>",
+    "<", "/function><", "/tool_call>",
+  ];
+  const request = {
+    model: "mimo-v2.6-pro",
+    tools: [
+      {
+        type: "function",
+        name: "write_stdin",
+        parameters: {
+          type: "object",
+          properties: {
+            session_id: { type: "integer" },
+            chars: { type: "string" },
+            yield_time_ms: { type: "integer" },
+            max_output_tokens: { type: "integer" },
+          },
+          required: ["session_id", "chars"],
+        },
+      },
+    ],
+  };
+  const translator = createResponseStreamTranslator(request);
+  const events = [
+    ...translator.start(),
+    ...translator.push({
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: "bad_call",
+                function: {
+                  name: "write_stdin",
+                  arguments: '{"session_id": "98233", "chars": ',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    }),
+    ...translator.push({ choices: [{ delta: { content: rawParts[0] } }] }),
+    ...translator.push({
+      choices: [{ delta: { content: rawParts.slice(1).join("") } }],
+    }),
+    ...translator.end(),
+  ];
+  const payloads = eventPayloads(events);
+  const completed = payloads.find((item) => item.type === "response.completed");
+  assert.equal(
+    payloads.some(
+      (item) =>
+        item.type === "response.output_text.delta" &&
+        item.delta.includes("tool_call"),
+    ),
+    false,
+  );
+  const call = completed.response.output.find(
+    (item) => item.type === "function_call",
+  );
+  assert.deepEqual(JSON.parse(call.arguments), {
+    session_id: 98233,
+    chars: "\u0003",
+    yield_time_ms: 1000,
+    max_output_tokens: 5000,
+  });
+});

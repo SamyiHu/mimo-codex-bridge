@@ -586,6 +586,189 @@ export function toChatRequest(body, options = {}) {
   return chat;
 }
 
+
+const TEXT_CALL_OPEN = "<" + "tool_call>";
+const TEXT_CALL_CLOSE = "<" + "/" + "tool_call>";
+const TEXT_FUNCTION_OPEN = "<" + "function=";
+const TEXT_FUNCTION_CLOSE = "<" + "/" + "function>";
+const TEXT_PARAM_OPEN = "<" + "parameter=";
+const TEXT_PARAM_CLOSE = "<" + "/" + "parameter>";
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const TEXT_CALL_PATTERN = new RegExp(
+  escapeRegExp(TEXT_CALL_OPEN) +
+    "\\s*" +
+    escapeRegExp(TEXT_FUNCTION_OPEN) +
+    "([^>]+)>" +
+    "([\\s\\S]*?)" +
+    escapeRegExp(TEXT_FUNCTION_CLOSE) +
+    "\\s*" +
+    escapeRegExp(TEXT_CALL_CLOSE),
+  "g",
+);
+const TEXT_PARAM_PATTERN = new RegExp(
+  escapeRegExp(TEXT_PARAM_OPEN) +
+    "([^>]+)>" +
+    "([\\s\\S]*?)" +
+    escapeRegExp(TEXT_PARAM_CLOSE),
+  "g",
+);
+
+function toolDefinitionByName(tools, name) {
+  return (tools ?? []).find((tool) => {
+    const toolName = tool?.function?.name ?? tool?.custom?.name ?? tool?.name;
+    return toolName === name;
+  });
+}
+
+function coerceTextToolValue(value, schema) {
+  const type = schema?.type;
+  const trimmed = String(value).trim();
+  if (type === "integer" || type === "number") {
+    const number = Number(trimmed);
+    if (trimmed && Number.isFinite(number)) return number;
+  }
+  if (type === "boolean") {
+    if (trimmed === "true") return true;
+    if (trimmed === "false") return false;
+  }
+  if (type === "null" && trimmed === "null") return null;
+  if (type === "array" || type === "object") {
+    try {
+      return JSON.parse(value);
+    } catch {}
+  }
+  return String(value);
+}
+
+function parseTextToolCall(raw, requestBody) {
+  TEXT_CALL_PATTERN.lastIndex = 0;
+  const match = TEXT_CALL_PATTERN.exec(raw);
+  TEXT_CALL_PATTERN.lastIndex = 0;
+  if (!match) return null;
+
+  const name = match[1].trim();
+  const definition = toolDefinitionByName(requestBody?.tools, name);
+  if (!definition) return null;
+
+  const schema = definition.function?.parameters ?? definition.parameters;
+  const parameters = {};
+  TEXT_PARAM_PATTERN.lastIndex = 0;
+  let parameter;
+  while ((parameter = TEXT_PARAM_PATTERN.exec(match[2]))) {
+    const key = parameter[1].trim();
+    parameters[key] = coerceTextToolValue(
+      parameter[2],
+      schema?.properties?.[key],
+    );
+  }
+  TEXT_PARAM_PATTERN.lastIndex = 0;
+  return { name, parameters, definition, raw };
+}
+
+function extractTextToolCalls(text, requestBody) {
+  const calls = [];
+  let remaining = String(text ?? "");
+  TEXT_CALL_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = TEXT_CALL_PATTERN.exec(remaining))) {
+    const parsed = parseTextToolCall(match[0], requestBody);
+    if (parsed) {
+      calls.push(parsed);
+      remaining = remaining.replace(match[0], "");
+      TEXT_CALL_PATTERN.lastIndex = 0;
+    }
+  }
+  TEXT_CALL_PATTERN.lastIndex = 0;
+  return { calls, text: remaining };
+}
+
+function validJsonObjectArguments(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
+function repairOrAddToolCalls(response, calls, requestBody, onAdd = null) {
+  const recovered = new Set();
+  for (const call of calls) {
+    const candidates = (response.output ?? []).filter(
+      (item) =>
+        (item.type === "function_call" || item.type === "custom_tool_call") &&
+        item.name === call.name &&
+        !recovered.has(item),
+    );
+    const target = candidates.find(
+      (item) =>
+        item.type === "custom_tool_call" ||
+        !validJsonObjectArguments(item.arguments),
+    ) ?? candidates[0];
+
+    if (target) {
+      recovered.add(target);
+      if (target.type === "custom_tool_call") {
+        target.input = JSON.stringify(call.parameters);
+      } else {
+        target.arguments = JSON.stringify(call.parameters);
+      }
+      target.status = "completed";
+      continue;
+    }
+
+    const isCustom = call.definition?.type === "custom";
+    const item = {
+      ...(isCustom
+        ? {
+            type: "custom_tool_call",
+            id: uid("ctc_"),
+            input: JSON.stringify(call.parameters),
+          }
+        : {
+            type: "function_call",
+            id: uid("fc_"),
+            arguments: JSON.stringify(call.parameters),
+          }),
+      call_id: uid("call_"),
+      name: call.name,
+      status: "completed",
+    };
+    response.output.push(item);
+    onAdd?.(item);
+  }
+}
+
+function normalizeTextToolCalls(response, requestBody) {
+  const recovered = [];
+  const emptyMessages = [];
+  for (const item of response.output ?? []) {
+    if (item.type !== "message") continue;
+    for (const part of item.content ?? []) {
+      if (part.type !== "output_text") continue;
+      const extraction = extractTextToolCalls(part.text, requestBody);
+      if (extraction.calls.length) {
+        recovered.push(...extraction.calls);
+        part.text = extraction.text;
+      }
+    }
+    item.content = (item.content ?? []).filter(
+      (part) =>
+        part.type !== "output_text" || String(part.text ?? "").length > 0,
+    );
+    if (!item.content.length) emptyMessages.push(item);
+  }
+  for (const item of emptyMessages) {
+    const index = response.output.indexOf(item);
+    if (index >= 0) response.output.splice(index, 1);
+  }
+  repairOrAddToolCalls(response, recovered, requestBody);
+}
+
 function makeBaseResponse(chatResponse, requestBody) {
   const response = {
     id: uid("resp_"),
@@ -817,6 +1000,7 @@ export function toResponseObject(chatResponse, requestBody) {
     }
   }
 
+  normalizeTextToolCalls(response, requestBody);
   setUsage(response, chatResponse?.usage);
   const status = responseStatusFromChoice(choice);
   response.status = status.status;
@@ -995,6 +1179,8 @@ export function createResponseStreamTranslator(requestBody, options = {}) {
     text: null,
     reasoning: null,
     toolCallsByIndex: new Map(),
+    textCallBuffer: null,
+    textCalls: [],
   };
 
   const addText = (delta) => {
@@ -1057,6 +1243,87 @@ export function createResponseStreamTranslator(requestBody, options = {}) {
     return [];
   };
 
+  const isTextCallPrefix = (value) =>
+    TEXT_CALL_OPEN.startsWith(value) && value.length < TEXT_CALL_OPEN.length;
+
+  const emitStreamText = (value) => {
+    const events = [];
+    if (!value) return events;
+    events.push(...addText(value));
+    state.text.content[0].text += value;
+    events.push(
+      event("response.output_text.delta", {
+        item_id: state.text.id,
+        output_index: response.output.indexOf(state.text),
+        content_index: 0,
+        delta: value,
+      }),
+    );
+    return events;
+  };
+
+  const pushStreamText = (value) => {
+    const events = [];
+    let text = String(value);
+    while (text.length || state.textCallBuffer !== null) {
+      if (state.textCallBuffer !== null) {
+        state.textCallBuffer += text;
+        text = "";
+        if (isTextCallPrefix(state.textCallBuffer)) return events;
+        if (!state.textCallBuffer.startsWith(TEXT_CALL_OPEN)) {
+          events.push(...emitStreamText(state.textCallBuffer));
+          state.textCallBuffer = null;
+          continue;
+        }
+
+        const end = state.textCallBuffer.indexOf(TEXT_CALL_CLOSE);
+        if (end < 0) return events;
+        const raw = state.textCallBuffer.slice(
+          0,
+          end + TEXT_CALL_CLOSE.length,
+        );
+        const remainder = state.textCallBuffer.slice(
+          end + TEXT_CALL_CLOSE.length,
+        );
+        state.textCallBuffer = null;
+        const parsed = parseTextToolCall(raw, requestBody);
+        if (parsed) {
+          state.textCalls.push(parsed);
+        } else {
+          events.push(...emitStreamText(raw));
+        }
+        text = remainder;
+        continue;
+      }
+
+      const start = text.indexOf(TEXT_CALL_OPEN);
+      if (start >= 0) {
+        events.push(...emitStreamText(text.slice(0, start)));
+        state.textCallBuffer = text.slice(start);
+        text = "";
+        continue;
+      }
+
+      let partialLength = 0;
+      for (
+        let length = Math.min(text.length, TEXT_CALL_OPEN.length - 1);
+        length > 0;
+        length -= 1
+      ) {
+        if (text.endsWith(TEXT_CALL_OPEN.slice(0, length))) {
+          partialLength = length;
+          break;
+        }
+      }
+      const visible = text.slice(0, text.length - partialLength);
+      events.push(...emitStreamText(visible));
+      state.textCallBuffer = partialLength ? text.slice(-partialLength) : null;
+      text = "";
+    }
+    return events;
+  };
+
+
   return {
     /** 返回正在构建的响应对象；调用方可据此尽早登记响应 ID 与取消控制器。 */
     currentResponse() {
@@ -1098,16 +1365,7 @@ export function createResponseStreamTranslator(requestBody, options = {}) {
       }
 
       if (delta.content) {
-        events.push(...addText(String(delta.content)));
-        state.text.content[0].text += String(delta.content);
-        events.push(
-          event("response.output_text.delta", {
-            item_id: state.text.id,
-            output_index: response.output.indexOf(state.text),
-            content_index: 0,
-            delta: String(delta.content),
-          }),
-        );
+        events.push(...pushStreamText(String(delta.content)));
       }
 
       for (const chunkToolCall of delta.tool_calls ?? []) {
@@ -1195,6 +1453,41 @@ export function createResponseStreamTranslator(requestBody, options = {}) {
     end(chatChunk) {
       const events = [];
       if (chatChunk) events.push(...this.push(chatChunk));
+      if (state.textCallBuffer !== null) {
+        const raw = state.textCallBuffer;
+        state.textCallBuffer = null;
+        events.push(...addText(raw));
+        state.text.content[0].text += raw;
+        events.push(
+          event("response.output_text.delta", {
+            item_id: state.text.id,
+            output_index: response.output.indexOf(state.text),
+            content_index: 0,
+            delta: raw,
+          }),
+        );
+      }
+      const recoveredToolEvents = [];
+      repairOrAddToolCalls(
+        response,
+        state.textCalls,
+        requestBody,
+        (item) => {
+          const toolIndex =
+            Math.max(-1, ...state.toolCallsByIndex.keys()) + 1;
+          state.toolCallsByIndex.set(toolIndex, item);
+          recoveredToolEvents.push(
+            event("response.output_item.added", {
+              output_index: response.output.indexOf(item),
+              item:
+                item.type === "custom_tool_call"
+                  ? { ...item, input: "" }
+                  : { ...item, arguments: "" },
+            }),
+          );
+        },
+      );
+      events.push(...recoveredToolEvents);
 
       if (state.reasoning) {
         const item = state.reasoning;
