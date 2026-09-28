@@ -55,9 +55,26 @@ const INSTANCE_DIR = argOf(
   "--dir",
   process.env.MIMO_BRIDGE_DIR || path.join(os.homedir(), ".mimo-bridge"),
 );
+const UPSTREAM_KIND = (
+  argOf("--upstream-kind", process.env.MIMO_BRIDGE_UPSTREAM_KIND || "mimo") ||
+  "mimo"
+).toLowerCase();
+const CHAT_MODE = (
+  argOf(
+    "--chat-mode",
+    process.env.MIMO_BRIDGE_CHAT_MODE ||
+      (UPSTREAM_KIND === "workbuddy" ? "raw" : "compatible"),
+  ) || "compatible"
+).toLowerCase();
+const RAW_CHAT = CHAT_MODE === "raw";
 const TOKEN_FILE = argOf(
   "--token-file",
-  path.join(import.meta.dirname, "token.txt"),
+  process.env.MIMO_BRIDGE_UPSTREAM_TOKEN_FILE ||
+    process.env.WORKBUDDY_API_KEY_FILE ||
+    path.join(
+      import.meta.dirname,
+      UPSTREAM_KIND === "workbuddy" ? "workbuddy-api-key.txt" : "token.txt",
+    ),
 );
 const BRIDGE_SECRET_FILE = argOf(
   "--bridge-secret-file",
@@ -71,11 +88,15 @@ const PROCESS_NAME = argOf(
 // 所以前缀和兜底模型都做成可配置，别再写死。
 const MODEL_PREFIX = argOf(
   "--model-prefix",
-  process.env.MIMO_BRIDGE_MODEL_PREFIX || "mimo-desktop",
+  process.env.MIMO_BRIDGE_MODEL_PREFIX ||
+    (UPSTREAM_KIND === "workbuddy" ? "off" : "mimo-desktop"),
 );
 const MODEL_FALLBACK = argOf(
   "--model-fallback",
-  process.env.MIMO_BRIDGE_MODEL_FALLBACK || "mimo-desktop/mimo-v2.6-pro",
+  process.env.MIMO_BRIDGE_MODEL_FALLBACK ||
+    (UPSTREAM_KIND === "workbuddy"
+      ? "off"
+      : "mimo-desktop/mimo-v2.6-pro"),
 );
 // 上游不返回 usage 时是否用本地估算器补齐（MIMO_BRIDGE_TOKEN_ESTIMATE=off 关闭）。
 const TOKEN_ESTIMATE_ENABLED = !/^(0|off|false)$/i.test(
@@ -83,7 +104,11 @@ const TOKEN_ESTIMATE_ENABLED = !/^(0|off|false)$/i.test(
 );
 const ENGINE_URL = (
 
-  argOf("--engine-url", process.env.MIMO_BRIDGE_ENGINE_URL || "") || ""
+  argOf(
+    "--engine-url",
+    process.env.MIMO_BRIDGE_ENGINE_URL ||
+      (UPSTREAM_KIND === "workbuddy" ? "http://127.0.0.1:7863" : ""),
+  ) || ""
 )
   .trim()
   .replace(/\/+$/, "");
@@ -146,6 +171,10 @@ const ALLOWED_HOSTS = new Set(
 );
 const DEBUG_INCLUDE_BODY = process.env.BRIDGE_DEBUG_INCLUDE_BODY === "1";
 const DEBUG_FILE = path.join(import.meta.dirname, "debug-requests.jsonl");
+const UPSTREAM_API_KEY =
+  process.env.WORKBUDDY_API_KEY ||
+  process.env.MIMO_BRIDGE_UPSTREAM_API_KEY ||
+  "";
 
 // 引擎明确拒绝、而 Codex 可能发送的 Responses 专属字段。
 const STRIP_FIELDS = [
@@ -160,13 +189,19 @@ const STRIP_FIELDS = [
 function loadToken() {
   const direct = argOf("--token", null);
   if (direct) return direct;
+  if (UPSTREAM_API_KEY) return UPSTREAM_API_KEY;
   if (fs.existsSync(TOKEN_FILE)) {
     return fs.readFileSync(TOKEN_FILE, "utf8").trim();
   }
+  const nextStep =
+    UPSTREAM_KIND === "workbuddy"
+      ? "write the workbuddy2api API key to " + TOKEN_FILE
+      : "run node mint-token.mjs";
   console.error(
-    "[bridge] 找不到 token 文件：" +
+    "[bridge] missing upstream credential file: " +
       TOKEN_FILE +
-      "\n[bridge] 先运行： node mint-token.mjs",
+      "\n[bridge] next step: " +
+      nextStep,
   );
   process.exit(2);
 }
@@ -372,7 +407,9 @@ async function discoverEngine(force = false) {
 
 function upstreamUrl(base, requestPath, keepQuery = true) {
   const url = new URL(base + requestPath);
-  url.searchParams.set("directory", INSTANCE_DIR);
+  if (UPSTREAM_KIND === "mimo") {
+    url.searchParams.set("directory", INSTANCE_DIR);
+  }
 
   if (keepQuery) {
     const incoming = new URL(requestPath, "http://bridge.local").searchParams;
@@ -486,7 +523,10 @@ function normalizeModel(body) {
     body &&
     typeof body === "object" &&
     typeof body.model === "string" &&
-    !body.model.includes("/")
+    MODEL_PREFIX &&
+    MODEL_PREFIX !== "off" &&
+    !body.model.includes("/") &&
+    !body.model.includes(":")
   ) {
     body.model = `${MODEL_PREFIX}/${body.model}`;
   }
@@ -512,7 +552,9 @@ async function fetchKnownModels(base) {
   if (knownModels && Date.now() - knownModelsFetchedAt < 60000) return knownModels;
   try {
     const url = new URL(base + "/v1/models");
-    url.searchParams.set("directory", INSTANCE_DIR);
+    if (UPSTREAM_KIND === "mimo") {
+      url.searchParams.set("directory", INSTANCE_DIR);
+    }
     const response = await fetch(url, {
       headers: { Authorization: "Bearer " + TOKEN },
       signal: AbortSignal.timeout(5000),
@@ -544,13 +586,24 @@ function pickFallbackModel(known) {
     if (candidate && candidate !== "off" && known.has(candidate)) return candidate;
   }
   for (const id of known) {
-    if (id.startsWith("mimo-desktop/") && !/asr|tts/i.test(id)) return id;
+    if (
+      !/asr|tts/i.test(id) &&
+      (id.startsWith("mimo-desktop/") ||
+        (UPSTREAM_KIND === "workbuddy" && id.includes(":")))
+    ) {
+      return id;
+    }
+  }
+  if (UPSTREAM_KIND === "workbuddy") {
+    for (const id of known) {
+      if (!/asr|tts/i.test(id)) return id;
+    }
   }
   return null;
 }
 
 async function applyModelFallback(base, chatBody) {
-  if (MODEL_FALLBACK === "off" || !chatBody?.model) return;
+  if (RAW_CHAT || MODEL_FALLBACK === "off" || !chatBody?.model) return;
   const known = await fetchKnownModels(base);
   if (!known || known.size === 0) return;
   if (known.has(chatBody.model)) return;
@@ -560,7 +613,7 @@ async function applyModelFallback(base, chatBody) {
   chatBody.model = fallback;
   debugLog({ event: "model_fallback", from: requested, to: fallback });
   console.error(
-    `[bridge] model "${requested}" is not on the MiMo engine; falling back to ${fallback}`,
+    `[bridge] model "${requested}" is not on the upstream; falling back to ${fallback}`,
   );
 }
 
@@ -572,6 +625,7 @@ const EFFORT_REJECTION_TTL_MS = 10 * 60 * 1000;
 const effortRejectionByModel = new Map();
 
 function stripRejectedReasoningEffort(chatBody) {
+  if (RAW_CHAT) return;
   if (!chatBody || !Object.hasOwn(chatBody, "reasoning_effort")) return;
   const memo = effortRejectionByModel.get(chatBody.model);
   if (memo && Date.now() - memo.at < EFFORT_REJECTION_TTL_MS) {
@@ -866,6 +920,8 @@ async function handleApiRequest(req, res, metricState = null) {
       200,
       {
         ok: !!base,
+        upstreamKind: UPSTREAM_KIND,
+        chatMode: CHAT_MODE,
         engine: base,
         instanceDir: INSTANCE_DIR,
         streaming: true,
@@ -911,6 +967,8 @@ async function handleApiRequest(req, res, metricState = null) {
       200,
       {
         ok: !!base,
+        upstreamKind: UPSTREAM_KIND,
+        chatMode: CHAT_MODE,
         pid: process.pid,
         version: BRIDGE_VERSION,
         node: process.version,
@@ -1062,9 +1120,9 @@ async function handleApiRequest(req, res, metricState = null) {
   if (req.method === "POST") {
     const raw = await readBody(req);
     body = parseJsonBody(raw);
-    normalizeModel(body);
+    if (!RAW_CHAT) normalizeModel(body);
 
-    if (!isResponses) {
+    if (!isResponses && !RAW_CHAT) {
       for (const field of STRIP_FIELDS) delete body[field];
     }
 
@@ -1161,7 +1219,9 @@ async function handleApiRequest(req, res, metricState = null) {
       return sendError(
         res,
         503,
-        "MiMo Desktop engine not found; start the desktop app and rerun mint-token.mjs",
+          UPSTREAM_KIND === "workbuddy"
+            ? "workbuddy2api not found; start it on the configured upstream URL"
+            : "MiMo Desktop engine not found; start the desktop app and rerun mint-token.mjs",
         requestId,
       );
     }
@@ -1492,9 +1552,14 @@ async function runBackgroundResponse(body, chatBody, requestId) {
   try {
     const base = await discoverEngine();
     if (!base) {
-      throw Object.assign(new Error("MiMo Desktop engine not found"), {
-        statusCode: 503,
-      });
+      throw Object.assign(
+        new Error(
+          UPSTREAM_KIND === "workbuddy"
+            ? "workbuddy2api not found"
+            : "MiMo Desktop engine not found",
+        ),
+        { statusCode: 503 },
+      );
     }
 
     // 与前台路径对齐：后台请求同样要做模型兜底，否则 MiMo 改模型 ID 后
@@ -1635,13 +1700,15 @@ server.listen(LISTEN_PORT, "127.0.0.1", async () => {
     `[bridge] listening on http://127.0.0.1:${LISTEN_PORT}/v1`,
   );
   console.log(
-    `[bridge] auth=${BRIDGE_AUTH_MODE}  upstream token: ${TOKEN.slice(0, 6)}…${TOKEN.slice(-4)}  instance dir: ${INSTANCE_DIR}`,
+    `[bridge] upstream=${UPSTREAM_KIND}  auth=${BRIDGE_AUTH_MODE}  upstream token: ${TOKEN.slice(0, 6)}…${TOKEN.slice(-4)}  instance dir: ${INSTANCE_DIR}`,
   );
   const base = await discoverEngine();
   console.log(
     base
       ? "[bridge] ready (streaming + authenticated)"
-      : "[bridge] warning: MiMo engine not found; /health will retry",
+      : UPSTREAM_KIND === "workbuddy"
+        ? "[bridge] warning: workbuddy2api not found; /health will retry"
+        : "[bridge] warning: MiMo engine not found; /health will retry",
   );
 });
 

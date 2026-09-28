@@ -1,5 +1,6 @@
 # 本机数据 / 运行产物
 token.txt
+workbuddy-api-key.txt
 bridge-secret.txt
 debug-requests.jsonl
 bridge.pid

@@ -11,7 +11,7 @@ Codex ── bridge-secret ──▶ mimo-bridge (127.0.0.1:8788)
                               └─ MiMo token ──▶ MiMo Desktop Engine
 ```
 
-当前版本：**2.5.0**。项目仅监听 `127.0.0.1`。MiMo Desktop 的内部接口不是稳定公开接口，客户端升级后可能需要再次适配。
+当前版本：**2.6.0**。项目仅监听 `127.0.0.1`。MiMo Desktop 与 WorkBuddy 的内部接口都不是稳定公开接口，客户端升级后可能需要再次适配。
 
 ## 两套凭据
 
@@ -171,6 +171,116 @@ codex exec `
 - `mimo-desktop/mimo-pro`（当前代 Pro 别名）
 - `mimo-desktop/mimo-flash`
 - `mimo-desktop/mimo-auto`
+
+## WorkBuddy 模型后端（可选）
+
+可以把 **WorkBuddy / CodeBuddy 的内置模型**接到本地 bridge，再由 Codex 或其他
+OpenAI-compatible agent 负责规划与工具执行：
+
+```text
+Codex / 其他 Agent
+      │ Responses API + 本地工具
+      ▼
+mimo-codex-bridge :8788
+      │ /v1/chat/completions + /v1/models
+      ▼
+workbuddy2api :7863
+      │ WorkBuddy 账号池、token 刷新、模型路由
+      ▼
+copilot.tencent.com
+```
+
+[WorkBuddy Manager](https://github.com/ithtelab/workbuddy-manager) 是这套上游的账号池
+管理面板。它发布包内的 `upstream/` 目录就是 MIT 许可的 `workbuddy2api` 源码；上游原始
+仓库已删除，因此新部署应使用该发布包中的源码。bridge 不复制账号池，只把它的
+OpenAI-compatible Chat API 作为可选 upstream。
+
+### 启动 WorkBuddy upstream
+
+先部署并启动 `workbuddy2api`，确认：
+
+```powershell
+curl.exe http://127.0.0.1:7863/healthz
+curl.exe http://127.0.0.1:7863/v1/models -H "Authorization: Bearer <workbuddy2api-api-key>"
+```
+
+把 `config.json` 中的 `api_key` 写入本仓库的 `workbuddy-api-key.txt`，然后启动 bridge：
+
+```powershell
+powershell -File .\mimo-bridge.ps1 setup `
+  -Upstream workbuddy `
+  -UpstreamUrl http://127.0.0.1:7863
+```
+
+也可以显式指定 key 文件或环境变量：
+
+```powershell
+powershell -File .\mimo-bridge.ps1 setup `
+  -Upstream workbuddy `
+  -UpstreamUrl http://127.0.0.1:7863 `
+  -UpstreamTokenFile C:\secure\workbuddy-api-key.txt
+
+$env:WORKBUDDY_API_KEY = "<workbuddy2api-api-key>"
+powershell -File .\mimo-bridge.ps1 setup -Upstream workbuddy
+```
+
+启动后从 bridge 读取模型 ID，**原样**填给 Codex / cc-switch，不要手动加
+`mimo-desktop/` 前缀：
+
+```powershell
+$secret = (Get-Content .\bridge-secret.txt -Raw).Trim()
+curl.exe http://127.0.0.1:8788/v1/models -H "Authorization: Bearer $secret"
+```
+
+典型 ID 为 `cn:deepseek-v4-flash`、`cn:glm-5.3`、`cn:kimi-k2.7`；`cn:` / `global:`
+是 workbuddy2api 的 realm 前缀，必须保留。Codex 的 agent loop、工具调用和本地文件
+操作仍由 Codex 负责；WorkBuddy 只负责模型推理与账号调度。
+
+### 在 cc-switch 中切换 WorkBuddy
+
+`cc-switch` 只负责 Codex 的 provider / model 配置；模型 ID 仍然由你选择。按下面顺序使用：
+
+1. 确认 `workbuddy2api` 已运行，且 `workbuddy-api-key.txt` 已写入它的 API key。
+2. 以 WorkBuddy upstream 启动 bridge：
+
+   ```powershell
+   powershell -File .\mimo-bridge.ps1 setup -Upstream workbuddy -UpstreamUrl http://127.0.0.1:7863
+   ```
+
+3. 在 cc-switch 添加供应商，配置文件使用 `cc-switch-provider-workbuddy.toml`：
+   - 名称：`Local AI Bridge (WorkBuddy)`
+   - Base URL：`http://127.0.0.1:8788/v1`
+   - Key：`bridge-secret.txt` 的完整内容
+4. 从 `/v1/models` 返回值中选择模型，模型字段必须保留 `cn:` / `global:` 前缀，例如 `cn:deepseek-v4-flash`、`cn:glm-5.3`、`cn:kimi-k2.7`。
+5. 保存并在 cc-switch 中切换到该 provider。Codex 负责 agent loop 和工具执行，WorkBuddy 只负责模型推理。
+
+要切回 MiMo，先把 bridge 切回 MiMo upstream：
+
+```powershell
+powershell -File .\mimo-bridge.ps1 setup -Upstream mimo
+```
+
+然后在 cc-switch 使用 `cc-switch-provider.toml`，并选择 `mimo-desktop/*` 模型。两个模板都只提供连接信息，不替你写 `model` 或 `model_catalog_json`。同一时间 `127.0.0.1:8788` 只能对应一个 bridge upstream，因此切换后端时要先重启 bridge。
+
+`workbuddy2api` 是非官方账号池网关，请仅使用本人授权账号并遵守对应服务条款。
+
+### 原生 Chat 暴露模式
+
+bridge 同时暴露 `/v1/chat/completions`。WorkBuddy upstream 默认使用 `ChatMode=raw`，会原样保留模型 ID 和请求字段，包括 `metadata`、`max_completion_tokens`、`tool_choice`、`parallel_tool_calls`、`stream_options`，适合 OpenAI Chat-compatible agent 直接连接：
+
+```text
+http://127.0.0.1:8788/v1/chat/completions
+Authorization: Bearer <bridge-secret.txt>
+```
+
+如需显式控制模式：
+
+```powershell
+powershell -File .\mimo-bridge.ps1 setup -Upstream workbuddy -ChatMode raw
+powershell -File .\mimo-bridge.ps1 setup -Upstream workbuddy -ChatMode compatible
+```
+
+官方 Claude Code 使用 Anthropic `/v1/messages` 协议，不是 OpenAI Chat；当前桥的 `/v1/chat/completions` 可供 Chat-compatible agent 使用，但不能直接当作 Claude Code 的 Anthropic API。
 
 ## 管理命令
 
@@ -377,14 +487,20 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 | `MIMO_BRIDGE_PORT` | `8788` | bridge 端口 |
 | `MIMO_BRIDGE_DIR` | `~/.mimo-bridge` | token 绑定的实例目录 |
 | `MIMO_BRIDGE_PROCESS` | `Xiaomi MiMo.exe` | 用于端口发现的进程名 |
-| `MIMO_BRIDGE_ENGINE_URL` | 空 | 固定引擎 URL，跳过端口发现 |
+| `MIMO_BRIDGE_UPSTREAM_KIND` | `mimo` | 上游类型：`mimo` 或 `workbuddy` |
+| `MIMO_BRIDGE_CHAT_MODE` | `compatible` / `raw` | Chat 字段兼容模式；WorkBuddy 默认 `raw` |
+| `MIMO_BRIDGE_ENGINE_URL` | 空 / `http://127.0.0.1:7863` | 固定上游 URL，跳过 MiMo 端口发现 |
+| `MIMO_BRIDGE_UPSTREAM_TOKEN_FILE` | `token.txt` / `workbuddy-api-key.txt` | 上游 API key 文件 |
+| `WORKBUDDY_API_KEY` | 空 | 可选的 workbuddy2api API key，优先于文件 |
+| `WORKBUDDY_API_KEY_FILE` | 空 | 可选的 workbuddy2api API key 文件 |
 | `MIMO_BRIDGE_SECRET` | 空 | 显式指定 bridge secret，优先于文件 |
 | `MIMO_BRIDGE_UPSTREAM_TIMEOUT_MS` | `600000` | 上游请求总超时 |
 | `MIMO_BRIDGE_MAX_BODY_BYTES` | `20971520` | 请求体上限 |
 | `MIMO_BRIDGE_MAX_CONCURRENT` | `8` | 模型请求最大并发数 |
 | `MIMO_BRIDGE_BREAKER_FAILURES` | `3` | 触发熔断的连续失败次数 |
 | `MIMO_BRIDGE_BREAKER_COOLDOWN_MS` | `5000` | 熔断冷却时间 |
-| `MIMO_BRIDGE_MODEL_FALLBACK` | `mimo-desktop/mimo-v2.6-pro` | 请求了引擎上不存在的模型时的兜底模型；`off` 关闭兜底 |
+| `MIMO_BRIDGE_MODEL_PREFIX` | `mimo-desktop` / `off` | 无 namespace 模型的前缀；WorkBuddy 模式默认关闭 |
+| `MIMO_BRIDGE_MODEL_FALLBACK` | `mimo-desktop/mimo-v2.6-pro` / `off` | 未知模型兜底；WorkBuddy 模式默认关闭 |
 | `MIMO_BRIDGE_TOKEN_ESTIMATE` | `1` | 上游缺失 usage 时是否本地估算补齐；`off` 关闭 |
 | `MIMO_BRIDGE_RESPONSE_TTL_MS` | `1800000` | `store=false` 的闲置状态保留时间 |
 | `MIMO_BRIDGE_RESPONSE_STATE_MAX` | `5000` | Responses 状态上限；活动和 `store=true` 不会被淘汰 |
@@ -424,7 +540,7 @@ bridge 模板只负责连接：
 
 | 文件 | 作用 |
 | --- | --- |
-| `bridge.mjs` | 协议桥接、认证、端口发现、流式代理、熔断 |
+| `bridge.mjs` | MiMo / WorkBuddy upstream、Responses 协议桥接、认证、流式代理、熔断 |
 | `responses.mjs` | Responses ⇄ Chat Completions 转换与 SSE 解析 |
 | `protocol-state.mjs` | Responses 状态持久化、TTL、取消和淘汰管理 |
 | `runtime.mjs` | 指标、并发限制、错误分类与熔断器 |
@@ -434,7 +550,9 @@ bridge 模板只负责连接：
 | `mimo-bridge.ps1` | 统一管理、诊断、可选配置与自启动入口 |
 | `启动 MiMo 桥.bat` | 唯一推荐的双击入口；只搭桥，不选模型 |
 | `apply-mimo-provider.ps1` | 可选的 Codex provider 直写 / 恢复工具 |
-| `cc-switch-provider.toml` | cc-switch 连接模板；模型由用户配置 |
+| `cc-switch-provider.toml` | MiMo 的 cc-switch 连接模板；模型由用户配置 |
+| `cc-switch-provider-workbuddy.toml` | WorkBuddy 的 cc-switch 连接模板；模型由用户配置 |
+| `workbuddy-api-key.txt` | 本机 workbuddy2api API key，Git 忽略 |
 | `test/` | 不依赖真实模型的自动测试 |
 | `live-checks/codex-tool.mjs` | 可选的真实 Codex 工具调用测试 |
 | `live-checks/protocol-live.mjs` | 真实 MiMo Responses 协议能力测试 |

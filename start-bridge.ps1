@@ -5,6 +5,13 @@
 [CmdletBinding()]
 param(
     [int]$Port = 8788,
+    [ValidateSet("mimo", "workbuddy")]
+    [string]$Upstream = "mimo",
+    [string]$UpstreamUrl = "",
+    [string]$UpstreamTokenFile = "",
+    [ValidateSet("compatible", "raw")]
+    [AllowEmptyString()]
+    [string]$ChatMode = "",
     [switch]$Foreground
 )
 $ErrorActionPreference = "Stop"
@@ -61,15 +68,20 @@ function Write-StartLog([string]$Message) {
     Write-Host $line
 }
 
+$nodeArgs = @($entry, "--port", "$Port", "--upstream-kind", $Upstream)
+if ($UpstreamUrl) { $nodeArgs += @("--engine-url", $UpstreamUrl) }
+if ($UpstreamTokenFile) { $nodeArgs += @("--token-file", $UpstreamTokenFile) }
+if ($ChatMode) { $nodeArgs += @("--chat-mode", $ChatMode) }
+
 if ($Foreground) {
-    Write-StartLog "foreground start on port $Port"
-    & node $entry --port $Port 2>&1 | Tee-Object -FilePath $logFile
+    Write-StartLog "foreground start on port $Port upstream=$Upstream chat=$ChatMode"
+    & node @nodeArgs 2>&1 | Tee-Object -FilePath $logFile
     return
 }
 
-Write-StartLog "background start on port $Port; runtime log -> $logFile"
+Write-StartLog "background start on port $Port upstream=$Upstream chat=$ChatMode; runtime log -> $logFile"
 $process = Start-Process -FilePath "node" `
-    -ArgumentList @($entry, "--port", "$Port") `
+    -ArgumentList $nodeArgs `
     -WorkingDirectory $dir `
     -WindowStyle Hidden `
     -RedirectStandardOutput $logFile `
@@ -110,5 +122,9 @@ if ($health) {
         throw $detail
     }
     Write-StartLog "bridge process PID $($process.Id) started but health check not ready yet"
-    Write-Host "请确认 MiMo Desktop 已运行，并已执行 node mint-token.mjs。" -ForegroundColor Yellow
+    if ($Upstream -eq "workbuddy") {
+        Write-Host "请确认 workbuddy2api 已运行，并且 API key 文件可用。" -ForegroundColor Yellow
+    } else {
+        Write-Host "请确认 MiMo Desktop 已运行，并已执行 node mint-token.mjs。" -ForegroundColor Yellow
+    }
 }

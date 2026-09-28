@@ -44,6 +44,13 @@ param(
 
     [int]$Port = 8788,
     [int]$LogLines = 100,
+    [ValidateSet("mimo", "workbuddy")]
+    [string]$Upstream = "mimo",
+    [string]$UpstreamUrl = "",
+    [string]$UpstreamTokenFile = "",
+    [ValidateSet("compatible", "raw")]
+    [AllowEmptyString()]
+    [string]$ChatMode = "",
     [switch]$ShowCommands,
     [switch]$OpenReport
 )
@@ -57,6 +64,24 @@ $secretFile = Join-Path $dir "bridge-secret.txt"
 $tokenFile = Join-Path $dir "token.txt"
 $debugFile = Join-Path $dir "debug-requests.jsonl"
 $taskName = "MiMo Codex Bridge"
+
+function Start-Bridge {
+    $startParams = @{
+        Port = $Port
+        Upstream = $Upstream
+        UpstreamUrl = $UpstreamUrl
+        UpstreamTokenFile = $UpstreamTokenFile
+    }
+    if ($ChatMode) { $startParams.ChatMode = $ChatMode }
+    & $startScript @startParams
+}
+
+function Invoke-Doctor([switch]$NoLiveRequest) {
+    $doctorArgs = @("--port", "$Port", "--upstream-kind", $Upstream)
+    if ($UpstreamTokenFile) { $doctorArgs += @("--upstream-token-file", $UpstreamTokenFile) }
+    if ($NoLiveRequest) { $doctorArgs += "--no-live-request" }
+    & node (Join-Path $dir "doctor.mjs") @doctorArgs
+}
 
 function Test-InteractiveWindow {
     try {
@@ -82,6 +107,7 @@ function Show-Usage {
     Write-Host "  .\mimo-bridge.ps1 doctor    自动诊断"
     Write-Host "  .\mimo-bridge.ps1 stop      停止 bridge"
     Write-Host "  .\mimo-bridge.ps1 configure-codex  可选：只写 Codex provider"
+    Write-Host "  .\mimo-bridge.ps1 setup -Upstream workbuddy -UpstreamUrl http://127.0.0.1:7863 [-ChatMode raw|compatible]"
     Write-Host "  双击「启动 MiMo 桥.bat」等价于 setup。模型继续由 cc-switch / 用户配置。"
 }
 
@@ -127,14 +153,17 @@ if (-not $bound) {
 try {
     switch ($Command) {
         "setup" {
-            Write-Host "初始化 MiMo bridge 凭据（不会修改 Codex 模型配置）..." -ForegroundColor Cyan
+            Write-Host "初始化本地 bridge 凭据（不会修改 Codex 模型配置）..." -ForegroundColor Cyan
             & node (Join-Path $dir "mint-token.mjs")
             if ($LASTEXITCODE -ne 0) { throw "mint-token 失败，ExitCode=$LASTEXITCODE" }
-            & $startScript -Port $Port
+            if ($Upstream -eq "workbuddy" -and $UpstreamTokenFile -and -not (Test-Path -LiteralPath $UpstreamTokenFile)) {
+                throw "找不到 WorkBuddy API key 文件：$UpstreamTokenFile"
+            }
+            Start-Bridge
             Start-Sleep -Milliseconds 300
             Show-BridgeStatus
             Write-Host ""
-            Write-Host "bridge 已就绪。Codex 的 model / 模型目录仍由 cc-switch 或用户自行配置。" -ForegroundColor Green
+            Write-Host "bridge 已就绪（upstream=$Upstream）。Codex 的 model / 模型目录仍由 cc-switch 或用户自行配置。" -ForegroundColor Green
             Write-Host "如需直接写入 provider（不改 model），运行：.\mimo-bridge.ps1 configure-codex" -ForegroundColor DarkGray
         }
 
@@ -152,7 +181,7 @@ try {
             & node (Join-Path $dir "mint-token.mjs")
             if ($LASTEXITCODE -ne 0) { throw "mint-token 失败，ExitCode=$LASTEXITCODE" }
             & $stopScript -Port $Port
-            & $startScript -Port $Port
+            Start-Bridge
             Show-BridgeStatus
         }
 
@@ -169,7 +198,7 @@ try {
         }
 
         "start" {
-            & $startScript -Port $Port
+            Start-Bridge
             if ($LASTEXITCODE -ne 0) { throw "start-bridge.ps1 失败，ExitCode=$LASTEXITCODE" }
             Start-Sleep -Milliseconds 400
             try {
@@ -185,13 +214,13 @@ try {
 
         "restart" {
             & $stopScript -Port $Port
-            & $startScript -Port $Port
+            Start-Bridge
             Start-Sleep -Milliseconds 300
             Show-BridgeStatus
         }
 
         "doctor" {
-            & node (Join-Path $dir "doctor.mjs") --port $Port
+            Invoke-Doctor
             if ($LASTEXITCODE -ne 0) { throw "doctor 失败，ExitCode=$LASTEXITCODE" }
         }
 
@@ -212,8 +241,8 @@ try {
             if ($LASTEXITCODE -ne 0) { throw "apply-mimo-provider 失败" }
 
             & $stopScript -Port $Port
-            & $startScript -Port $Port
-            & node (Join-Path $dir "doctor.mjs") --port $Port --no-live-request
+            Start-Bridge
+            Invoke-Doctor -NoLiveRequest
             if ($LASTEXITCODE -ne 0) { throw "doctor 失败" }
         }
 
@@ -246,7 +275,10 @@ try {
                 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' +
                 $startScript +
                 '" -Port ' +
-                $Port
+                $Port +
+                ' -Upstream ' + $Upstream +
+                ' -UpstreamUrl "' + $UpstreamUrl + '"' +
+                ' -UpstreamTokenFile "' + $UpstreamTokenFile + '"' + $(if ($ChatMode) { ' -ChatMode ' + $ChatMode } else { '' })
             & schtasks.exe /Create /TN $taskName /TR $commandLine /SC ONLOGON /RL LIMITED /F
             if ($LASTEXITCODE -ne 0) { throw "创建自启动任务失败" }
             Write-Host "已创建登录自启动任务：$taskName" -ForegroundColor Green
