@@ -1,5 +1,5 @@
 ﻿<#
-  start-bridge.ps1 — 后台启动 MiMo→Codex 桥接服务。
+  start-bridge.ps1 — 后台启动统一模型桥服务。
   只会停止明确由 bridge.mjs 启动的旧进程；不会强杀端口上的无关程序。
 #>
 [CmdletBinding()]

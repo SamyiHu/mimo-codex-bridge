@@ -1,5 +1,5 @@
 /**
- * mimo-bridge — MiMo Desktop 本地引擎到 Codex 的协议桥接。
+ * model-bridge — MiMo / WorkBuddy 模型上游到 Codex-compatible agent 的协议桥接。
  *
  * 主要能力：
  * - Responses API ⇄ Chat Completions 协议转换

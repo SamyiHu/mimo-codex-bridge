@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * mimo-bridge doctor — 检查 Node、bridge、MiMo 引擎、Codex 配置和可选实时请求。
+ * model-bridge doctor — 检查 Node、bridge、模型上游、Codex 配置和可选实时请求。
  * 不输出任何凭据内容。
  */
 import fs from "node:fs";
