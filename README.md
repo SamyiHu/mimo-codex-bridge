@@ -301,7 +301,33 @@ powershell -File .\model-bridge.ps1 setup -Upstream workbuddy -ChatMode raw
 powershell -File .\model-bridge.ps1 setup -Upstream workbuddy -ChatMode compatible
 ```
 
-官方 Claude Code 使用 Anthropic `/v1/messages` 协议，不是 OpenAI Chat；当前桥的 `/v1/chat/completions` 可供 Chat-compatible agent 使用，但不能直接当作 Claude Code 的 Anthropic API。
+### Anthropic Messages（Claude Code / Anthropic 客户端）
+
+桥接支持入站 Anthropic `/v1/messages` 协议，Claude Code 等 Anthropic 客户端可以经桥接使用 MiMo / WorkBuddy：
+
+```text
+http://127.0.0.1:8788/v1/messages
+x-api-key: <bridge-secret.txt>
+anthropic-version: 2023-06-01
+```
+
+覆盖能力：
+
+- 文本对话、`system`（字符串或 text 块）
+- 工具：`tools` / `tool_choice` / `tool_use` / `tool_result`
+- 图片：base64 与 url 两种 `source`
+- 流式：`message_start` → `content_block_*` → `message_delta` → `message_stop`
+- `POST /v1/messages/count_tokens` 本地估算
+- 错误返回 Anthropic 格式 `{"type":"error","error":{...}}`
+- 上游缺失 usage 时按 token 估算补齐
+
+Claude Code 侧示例：
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8788"
+$env:ANTHROPIC_API_KEY = (Get-Content .\bridge-secret.txt -Raw).Trim()
+# 模型名使用 mimo-desktop/*，例如 mimo-desktop/mimo-v2.6-pro
+```
 
 ## 管理命令
 
@@ -430,6 +456,7 @@ npm test
 自动测试不依赖真实 MiMo Desktop，覆盖：
 
 - Responses 与 Chat Completions 协议转换
+- Anthropic Messages ⇄ Chat Completions 协议转换（含流式）
 - 工具调用、`tool_choice` 和多模态内容
 - 真实增量 SSE 转换
 - SSE 分片解析
@@ -563,6 +590,7 @@ bridge 模板只负责连接：
 | --- | --- |
 | `bridge.mjs` | MiMo / WorkBuddy upstream、Responses 协议桥接、认证、流式代理、熔断 |
 | `responses.mjs` | Responses ⇄ Chat Completions 转换与 SSE 解析 |
+| `anthropic-messages.mjs` | Anthropic Messages ⇄ Chat Completions 转换与 SSE |
 | `protocol-state.mjs` | Responses 状态持久化、TTL、取消和淘汰管理 |
 | `runtime.mjs` | 指标、并发限制、错误分类与熔断器 |
 | `token-estimate.mjs` | 上游缺失 usage 时的本地 token 估算器 |

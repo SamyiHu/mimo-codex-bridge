@@ -30,6 +30,13 @@ import {
   createQueuedResponse,
   sseWrite,
 } from "./responses.mjs";
+import {
+  toChatRequestFromAnthropic,
+  toAnthropicMessage,
+  createAnthropicStreamTranslator,
+  anthropicErrorPayload,
+  anthropicSseWrite,
+} from "./anthropic-messages.mjs";
 import { ResponseStore } from "./protocol-state.mjs";
 import {
   estimateChatRequestTokens,
@@ -494,6 +501,17 @@ function sendJson(res, status, payload, requestId) {
 function sendError(res, status, message, requestId, type = "bridge_error") {
   metrics.observeError(type);
   sendJson(res, status, { error: { message, type } }, requestId);
+}
+
+function sendAnthropicError(res, status, message, requestId, type = "invalid_request_error") {
+  metrics.observeError(type);
+  if (res.headersSent || res.writableEnded) return;
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    ...(requestId ? { "X-Request-ID": requestId } : {}),
+  });
+  res.end(JSON.stringify(anthropicErrorPayload(message, type)));
 }
 
 /**
@@ -1035,6 +1053,169 @@ async function proxyResponsesStream({
   }
 }
 
+async function proxyAnthropicStream({
+  res,
+  upstream,
+  requestBody,
+  chatBody,
+  requestId,
+  abortContext,
+  cancellation,
+  metricState,
+}) {
+  const contentType = upstream.headers.get("content-type") || "";
+
+  if (!contentType.includes("text/event-stream")) {
+    const payload = await upstream.json().catch(() => null);
+    if (!payload) {
+      return sendAnthropicError(
+        res,
+        502,
+        "upstream returned an invalid streaming response",
+        requestId,
+        "api_error",
+      );
+    }
+    const message = toAnthropicMessage(payload, requestBody, {
+      estimateMissingUsage: TOKEN_ESTIMATE_ENABLED,
+      estimatedInputTokens: TOKEN_ESTIMATE_ENABLED
+        ? estimateChatRequestTokens(chatBody)
+        : 0,
+    });
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store",
+      Connection: "keep-alive",
+      "X-Request-ID": requestId,
+    });
+    const translator = createAnthropicStreamTranslator(requestBody, {
+      estimatedInputTokens: message.usage?.input_tokens ?? 0,
+    });
+    for (const evt of translator.start()) await anthropicSseWrite(res, evt);
+    for (const block of message.content ?? []) {
+      if (block.type === "text") {
+        const pushed = translator.push({
+          choices: [{ delta: { content: block.text } }],
+        });
+        for (const evt of pushed) await anthropicSseWrite(res, evt);
+      } else if (block.type === "tool_use") {
+        const pushed = translator.push({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    id: block.id,
+                    function: {
+                      name: block.name,
+                      arguments: JSON.stringify(block.input ?? {}),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+        for (const evt of pushed) await anthropicSseWrite(res, evt);
+      }
+    }
+    for (const evt of translator.end()) await anthropicSseWrite(res, evt);
+    res.end();
+    return;
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-store",
+    Connection: "keep-alive",
+    "X-Request-ID": requestId,
+  });
+
+  const translator = createAnthropicStreamTranslator(requestBody, {
+    estimatedInputTokens: TOKEN_ESTIMATE_ENABLED
+      ? estimateChatRequestTokens(chatBody)
+      : 0,
+    estimateMissingUsage: TOKEN_ESTIMATE_ENABLED,
+  });
+  for (const evt of translator.start()) await anthropicSseWrite(res, evt);
+
+  const parsedChunks = [];
+  const parser = createSseParser((parsed) => {
+    if (
+      parsed.event === "error" ||
+      parsed.data?.type === "error" ||
+      parsed.data?.error
+    ) {
+      throw new Error(
+        parsed.data?.error?.message ??
+          parsed.data?.message ??
+          "upstream SSE error",
+      );
+    }
+    if (
+      parsed.data &&
+      typeof parsed.data === "object" &&
+      (parsed.data.object === "chat.completion.chunk" || parsed.data.choices)
+    ) {
+      parsedChunks.push(parsed.data);
+    }
+  });
+
+  try {
+    for await (const rawChunk of upstream.body) {
+      if (res.destroyed || abortContext.signal.aborted) {
+        throw new Error("client disconnected");
+      }
+      parser.push(rawChunk);
+      while (parsedChunks.length) {
+        const chunk = parsedChunks.shift();
+        const translated = translator.push(chunk);
+        if (translated.some((evt) => evt.event === "content_block_delta")) {
+          metrics.observeFirstToken(
+            metricState,
+            metricState ? Date.now() - metricState.startedAt : 0,
+          );
+        }
+        for (const evt of translated) await anthropicSseWrite(res, evt);
+      }
+    }
+    parser.end();
+    for (const evt of translator.end()) await anthropicSseWrite(res, evt);
+    res.end();
+  } catch (error) {
+    debugLog({
+      requestId,
+      path: "/v1/messages",
+      streamError: String(error?.message ?? error),
+    });
+
+    if (cancellation.signal.aborted) {
+      if (!res.writableEnded) {
+        try {
+          for (const evt of translator.cancel()) {
+            await anthropicSseWrite(res, evt);
+          }
+        } catch {}
+        res.end();
+      }
+      return;
+    }
+
+    if (!abortContext.signal.aborted && !res.destroyed) {
+      metrics.observeError("stream_interrupted");
+      metrics.breaker.recordFailure();
+    }
+    if (!res.writableEnded) {
+      try {
+        for (const evt of translator.fail(error?.message ?? error)) {
+          await anthropicSseWrite(res, evt);
+        }
+      } catch {}
+      res.end();
+    }
+  }
+}
+
 async function proxyPassThrough({
   req,
   res,
@@ -1156,6 +1337,8 @@ async function handleApiRequest(req, res, metricState = null) {
           response_cancellation: true,
           response_deletion: true,
           custom_tools: true,
+          anthropic_messages: true,
+          anthropic_count_tokens: true,
         },
         responseState: responseStore.snapshot(),
         metrics: snapshot,
@@ -1168,13 +1351,19 @@ async function handleApiRequest(req, res, metricState = null) {
     return sendError(res, 404, `unsupported path ${requestPath}`, requestId);
   }
 
+  const anthropicApi =
+    requestPath === "/v1/messages" ||
+    requestPath === "/v1/messages/count_tokens";
+  const fail = (status, message, type = "invalid_request_error") =>
+    anthropicApi
+      ? sendAnthropicError(res, status, message, requestId, type)
+      : sendError(res, status, message, requestId, type);
+
   if (!isBridgeAuthorized(req)) {
-    return sendError(
-      res,
+    return fail(
       401,
       "missing or invalid bridge bearer token",
-      requestId,
-      "invalid_api_key",
+      anthropicApi ? "authentication_error" : "invalid_api_key",
     );
   }
 
@@ -1247,18 +1436,22 @@ async function handleApiRequest(req, res, metricState = null) {
   }
 
   const isResponses = requestPath === "/v1/responses";
+  const isAnthropicMessages = requestPath === "/v1/messages";
+  const isAnthropicCount = requestPath === "/v1/messages/count_tokens";
   const supported =
-    (isResponses || requestPath === "/v1/chat/completions") &&
+    (isResponses ||
+      isAnthropicMessages ||
+      isAnthropicCount ||
+      requestPath === "/v1/chat/completions") &&
       req.method === "POST" ||
     requestPath === "/v1/models" && req.method === "GET";
 
   if (!supported) {
     res.setHeader("Allow", "GET, POST");
-    return sendError(
-      res,
+    return fail(
       405,
       `method ${req.method} is not supported for ${requestPath}`,
-      requestId,
+      "method_not_allowed",
     );
   }
 
@@ -1268,22 +1461,35 @@ async function handleApiRequest(req, res, metricState = null) {
       Math.ceil(metrics.breaker.retryAfterMs / 1000),
     );
     res.setHeader("Retry-After", String(retryAfterSeconds));
-    return sendError(
-      res,
+    return fail(
       503,
       `MiMo upstream circuit is open; retry in ${retryAfterSeconds}s`,
-      requestId,
-      "circuit_open",
+      anthropicApi ? "overloaded_error" : "circuit_open",
     );
   }
 
   let body = {};
   if (req.method === "POST") {
     const raw = await readBody(req);
-    body = parseJsonBody(raw);
-    if (!RAW_CHAT) normalizeModel(body);
+    try {
+      body = parseJsonBody(raw);
+    } catch (error) {
+      if (isAnthropicMessages || isAnthropicCount) {
+        return sendAnthropicError(
+          res,
+          error?.statusCode || 400,
+          String(error?.message ?? error),
+          requestId,
+          error?.type || "invalid_request_error",
+        );
+      }
+      throw error;
+    }
+    if (!RAW_CHAT && !isAnthropicMessages && !isAnthropicCount) {
+      normalizeModel(body);
+    }
 
-    if (!isResponses && !RAW_CHAT) {
+    if (!isResponses && !isAnthropicMessages && !isAnthropicCount && !RAW_CHAT) {
       for (const field of STRIP_FIELDS) delete body[field];
     }
 
@@ -1299,8 +1505,52 @@ async function handleApiRequest(req, res, metricState = null) {
     });
   }
 
+  // Anthropic count_tokens 用本地估算即可，不必打到上游。
+  if (isAnthropicCount) {
+    try {
+      const probe = toChatRequestFromAnthropic(
+        { ...body, stream: false, max_tokens: body.max_tokens ?? 1 },
+        { mapThinkingToReasoning: false },
+      );
+      const inputTokens = TOKEN_ESTIMATE_ENABLED
+        ? estimateChatRequestTokens(probe)
+        : 0;
+      return sendJson(res, 200, { input_tokens: inputTokens }, requestId);
+    } catch (error) {
+      return sendAnthropicError(
+        res,
+        error?.statusCode || 400,
+        String(error?.message ?? error),
+        requestId,
+        error?.type || "invalid_request_error",
+      );
+    }
+  }
+
   metrics.setModel(metricState, body.model);
   let chatBody = body;
+
+  if (isAnthropicMessages) {
+    try {
+      chatBody = toChatRequestFromAnthropic(body);
+    } catch (error) {
+      return sendAnthropicError(
+        res,
+        error?.statusCode || 400,
+        String(error?.message ?? error),
+        requestId,
+        error?.type || "invalid_request_error",
+      );
+    }
+    if (!RAW_CHAT) normalizeModel(chatBody);
+    chatBody.stream = body.stream === true;
+    if (chatBody.stream) {
+      chatBody.stream_options = {
+        ...(chatBody.stream_options || {}),
+        include_usage: true,
+      };
+    }
+  }
 
   if (isResponses) {
     const previousResponse = body.previous_response_id
@@ -1367,7 +1617,9 @@ async function handleApiRequest(req, res, metricState = null) {
     cancellation.signal,
   ]);
   let upstreamPath = requestPath;
-  if (isResponses) upstreamPath = "/v1/chat/completions";
+  if (isResponses || isAnthropicMessages) {
+    upstreamPath = "/v1/chat/completions";
+  }
 
   // 个别模型（如 xiaomi/mimo-x-pro-preview）不接受 reasoning_effort，
   // 上游会明确 400；这种情况下去掉该字段重试一次，而不是把错误抛给客户端。
@@ -1392,11 +1644,12 @@ async function handleApiRequest(req, res, metricState = null) {
     const target = upstreamUrl(base, upstreamPath);
     const upstreamRequestStartedAt = Date.now();
     try {
-      const accept = isResponses
-        ? body.stream
-          ? "text/event-stream"
-          : "application/json"
-        : req.headers.accept || "*/*";
+      const accept =
+        isResponses || isAnthropicMessages
+          ? body.stream
+            ? "text/event-stream"
+            : "application/json"
+          : req.headers.accept || "*/*";
 
       const upstream = await fetchUpstream(
         target,
@@ -1542,6 +1795,86 @@ async function handleApiRequest(req, res, metricState = null) {
             Date.now() - metricState.startedAt,
           );
           sendJson(res, 200, response, requestId);
+        }
+      } else if (isAnthropicMessages) {
+        if (!upstream.ok) {
+          const message = await readUpstreamError(upstream);
+          metrics.observeError(errorTypeFromStatus(upstream.status));
+          if (isRetryableStatus(upstream.status)) {
+            metrics.breaker.recordFailure();
+            if (attempt === 0) {
+              metrics.observeRetry();
+              abortContext.dispose();
+              abortContext = createAbortContext([
+                clientAbort.signal,
+                cancellation.signal,
+              ]);
+              continue;
+            }
+          }
+          abortContext.dispose();
+          return sendAnthropicError(
+            res,
+            upstream.status,
+            message,
+            requestId,
+            errorTypeFromStatus(upstream.status),
+          );
+        }
+
+        if (body.stream) {
+          await proxyAnthropicStream({
+            res,
+            upstream,
+            requestBody: body,
+            chatBody,
+            requestId,
+            abortContext,
+            cancellation,
+            metricState,
+          });
+        } else {
+          const payload = await upstream.json().catch(() => null);
+          if (!payload) {
+            metrics.breaker.recordFailure();
+            metrics.observeError("invalid_upstream_response");
+            abortContext.dispose();
+            return sendAnthropicError(
+              res,
+              502,
+              "upstream returned invalid JSON",
+              requestId,
+              "api_error",
+            );
+          }
+          const message = toAnthropicMessage(payload, body, {
+            estimateMissingUsage: TOKEN_ESTIMATE_ENABLED,
+            estimatedInputTokens: TOKEN_ESTIMATE_ENABLED
+              ? estimateChatRequestTokens(chatBody)
+              : 0,
+          });
+          metrics.observeFirstToken(
+            metricState,
+            metricState ? Date.now() - metricState.startedAt : 0,
+          );
+          if (message.usage?.total_tokens || message.usage?.output_tokens) {
+            metrics.observeUsage({
+              input_tokens: message.usage.input_tokens || 0,
+              output_tokens: message.usage.output_tokens || 0,
+              total_tokens:
+                (message.usage.input_tokens || 0) +
+                (message.usage.output_tokens || 0),
+            });
+          } else if (TOKEN_ESTIMATE_ENABLED) {
+            metrics.observeEstimatedUsage({
+              input_tokens: message.usage?.input_tokens || 0,
+              output_tokens: message.usage?.output_tokens || 0,
+              total_tokens:
+                (message.usage?.input_tokens || 0) +
+                (message.usage?.output_tokens || 0),
+            });
+          }
+          sendJson(res, 200, message, requestId);
         }
       } else {
         if (!upstream.ok) {
@@ -1835,7 +2168,9 @@ const server = http.createServer((req, res) => {
   // 并发额度只配额给真正会占用上游的端点。取消、查询、删除都只动本地状态：
   // 一旦数据面被打满，这些控制面接口必须仍然可用，否则连取消都发不出去。
   const consumesUpstream =
-    (requestPath === "/v1/responses" || requestPath === "/v1/chat/completions") &&
+    (requestPath === "/v1/responses" ||
+      requestPath === "/v1/messages" ||
+      requestPath === "/v1/chat/completions") &&
     req.method === "POST";
 
   if (consumesUpstream) {
