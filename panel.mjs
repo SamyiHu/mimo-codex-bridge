@@ -327,6 +327,7 @@ async function collectStatus() {
         engine: health.payload.engine || "",
         streaming: health.payload.streaming,
         authMode: health.payload.authMode || "",
+        protocols: health.payload.protocols || null,
       };
       if (bridgeSecret) {
         try {
@@ -852,6 +853,8 @@ const HTML = `<!doctype html>
 
     <footer>
       只监听 127.0.0.1。切换上游会重启 bridge；模型仍由 cc-switch / Codex 配置选择。<br>
+      Anthropic 客户端（Claude Code）：<code>ANTHROPIC_BASE_URL=http://127.0.0.1:8788</code> ·
+      <code>ANTHROPIC_API_KEY=&lt;bridge-secret&gt;</code> · 模型用 <code>mimo-desktop/*</code>。<br>
       WorkBuddy2API 离线 = workbuddy2api 网关未启动（WorkBuddy 客户端 ≠ API 网关）。
     </footer>
   </div>
@@ -937,10 +940,23 @@ const HTML = `<!doctype html>
       const k = data.keys || {};
       const c = data.codex || {};
 
+      const proto = b.protocols || {};
+      const protoParts = [];
+      if (proto.responses !== false) protoParts.push("Responses");
+      if (proto.chat_completions !== false) protoParts.push("Chat Completions");
+      if (proto.anthropic_messages) protoParts.push("Anthropic Messages");
+      if (proto.anthropic_count_tokens) protoParts.push("count_tokens");
+
       const rows = [
         ["Bridge", b.online ? '<span class="dot ok"></span>运行中' : '<span class="dot err"></span>未运行'],
         ["当前上游", b.upstreamKind || "—"],
         ["Chat 模式", b.chatMode || "—"],
+        ["入站协议", protoParts.length
+          ? protoParts.map((p) => '<span class="chip">' + p + "</span>").join(" ")
+          : (b.online ? "Responses · Chat Completions" : "—")],
+        ["Anthropic 端点", b.online
+          ? '<code>/v1/messages</code> · <code>x-api-key</code> = bridge-secret'
+          : "—"],
         ["WorkBuddy2API", w.online
           ? '<span class="dot ok"></span>在线' + (w.modelCount != null ? " · " + w.modelCount + " 个模型" : "")
           : '<span class="dot err"></span>离线 · ' + (w.detail || "未运行或不可达")],

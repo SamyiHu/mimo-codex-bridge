@@ -123,6 +123,22 @@ const UPSTREAM_TIMEOUT_MS = intFrom(
   process.env.MIMO_BRIDGE_UPSTREAM_TIMEOUT_MS || 600000,
   600000,
 );
+// 上游偶发「headers 正常但长时间不吐 delta」。总超时 10 分钟对交互太长，
+// 这里拆成首包超时 + 流空闲超时，超时立刻中止并把错误抛给客户端。
+const FIRST_TOKEN_TIMEOUT_MS = intFrom(
+  process.env.MIMO_BRIDGE_FIRST_TOKEN_TIMEOUT_MS || 60000,
+  60000,
+);
+const STREAM_IDLE_TIMEOUT_MS = intFrom(
+  process.env.MIMO_BRIDGE_STREAM_IDLE_TIMEOUT_MS || 90000,
+  90000,
+);
+// fetch() 要等到上游响应头才会 resolve。上游若接受请求后迟迟不回头，
+// 不加限时会一直挂到总超时（默认 10 分钟）。
+const UPSTREAM_HEADER_TIMEOUT_MS = intFrom(
+  process.env.MIMO_BRIDGE_UPSTREAM_HEADER_TIMEOUT_MS || FIRST_TOKEN_TIMEOUT_MS,
+  FIRST_TOKEN_TIMEOUT_MS,
+);
 const MAX_BODY_BYTES = intFrom(
   process.env.MIMO_BRIDGE_MAX_BODY_BYTES || 20 * 1024 * 1024,
   20 * 1024 * 1024,
@@ -462,12 +478,63 @@ function createAbortContext(externalSignals, timeoutMs = UPSTREAM_TIMEOUT_MS) {
     get cause() {
       return cause;
     },
+    abort(reason) {
+      abortWith(reason);
+    },
     dispose() {
       clearTimeout(timer);
       for (const [signal, listener] of listeners) {
         signal.removeEventListener("abort", listener);
       }
       listeners.length = 0;
+    },
+  };
+}
+
+/**
+ * 流式看门狗：首包超时 + 包间空闲超时。
+ * 超时会 abort 上游请求，并回调 onTimeout(kind, error)。
+ */
+function createStreamWatchdog(abortContext, onTimeout) {
+  let timer = null;
+  let firstDone = false;
+  let stopped = false;
+
+  const arm = (ms, kind) => {
+    clearTimeout(timer);
+    if (stopped) return;
+    timer = setTimeout(() => {
+      if (stopped) return;
+      stopped = true;
+      const error = new Error(
+        kind === "first_token"
+          ? `upstream produced no data within ${FIRST_TOKEN_TIMEOUT_MS}ms`
+          : `upstream stream idle for ${STREAM_IDLE_TIMEOUT_MS}ms`,
+      );
+      error.code = kind;
+      console.error(`[bridge] stream watchdog ${kind}: ${error.message}`);
+      try {
+        onTimeout?.(kind, error);
+      } catch {}
+      abortContext.abort(error);
+    }, ms);
+  };
+
+  return {
+    start() {
+      firstDone = false;
+      stopped = false;
+      console.error(`[bridge] stream watchdog armed first=${FIRST_TOKEN_TIMEOUT_MS}ms idle=${STREAM_IDLE_TIMEOUT_MS}ms`);
+      arm(FIRST_TOKEN_TIMEOUT_MS, "first_token");
+    },
+    touch() {
+      if (stopped) return;
+      firstDone = true;
+      arm(STREAM_IDLE_TIMEOUT_MS, "idle");
+    },
+    stop() {
+      stopped = true;
+      clearTimeout(timer);
     },
   };
 }
@@ -722,17 +789,33 @@ async function fetchUpstream(
   requestId,
   accept,
 ) {
-  return fetch(target, {
-    ...init,
-    signal: abortContext.signal,
-    headers: {
-      Authorization: "Bearer " + TOKEN,
-      "Content-Type": "application/json",
-      Accept: accept || "*/*",
-      "X-Request-ID": requestId || "",
-      ...(init.headers || {}),
-    },
-  });
+  // fetch() 只在响应头到达后才 resolve。上游吞掉请求不回头时，必须有
+  // 比总超时短得多的响应头限时，否则客户端会空等十分钟。
+  const headerTimer = setTimeout(() => {
+    const error = new Error(
+      `upstream headers timeout after ${UPSTREAM_HEADER_TIMEOUT_MS}ms`,
+    );
+    error.code = "upstream_header_timeout";
+    console.error(`[bridge] ${error.message} for ${target}`);
+    metrics.observeError("upstream_header_timeout");
+    abortContext.abort(error);
+  }, UPSTREAM_HEADER_TIMEOUT_MS);
+
+  try {
+    return await fetch(target, {
+      ...init,
+      signal: abortContext.signal,
+      headers: {
+        Authorization: "Bearer " + TOKEN,
+        "Content-Type": "application/json",
+        Accept: accept || "*/*",
+        "X-Request-ID": requestId || "",
+        ...(init.headers || {}),
+      },
+    });
+  } finally {
+    clearTimeout(headerTimer);
+  }
 }
 
 
@@ -901,6 +984,22 @@ async function proxyResponsesStream({
     else await sseWrite(res, evt);
   };
 
+  const watchdog = createStreamWatchdog(abortContext, (kind, error) => {
+    debugLog({
+      requestId,
+      event: "stream_watchdog",
+      kind,
+      message: String(error?.message ?? error),
+    });
+    metrics.observeError(
+      kind === "first_token"
+        ? "upstream_first_token_timeout"
+        : "upstream_idle_timeout",
+    );
+    metrics.breaker.recordFailure();
+  });
+  watchdog.start();
+
   const translator = createResponseStreamTranslator(requestBody, {
     estimatedInputTokens: TOKEN_ESTIMATE_ENABLED
       ? estimateChatRequestTokens(chatBody)
@@ -937,6 +1036,7 @@ async function proxyResponsesStream({
 
   try {
     for await (const rawChunk of upstream.body) {
+      watchdog.touch();
       if (res.destroyed || abortContext.signal.aborted) {
         throw new Error("client disconnected");
       }
@@ -960,6 +1060,7 @@ async function proxyResponsesStream({
         for (const evt of translated) await emitEvent(evt);
       }
     }
+    watchdog.stop();
     parser.end();
     const completedEvents = translator.end();
     const completed = completedEvents
@@ -1022,6 +1123,7 @@ async function proxyResponsesStream({
     }
     res.end();
   } catch (error) {
+    watchdog.stop();
     debugLog({
       requestId,
       path: req.url,
@@ -1131,6 +1233,24 @@ async function proxyAnthropicStream({
     "X-Request-ID": requestId,
   });
 
+  // 看门狗必须在任何 await 写之前武装：否则首帧写入若因背压/客户端
+  // 异常挂住，超时逻辑永远不会启动，请求会一直悬到总超时。
+  const watchdog = createStreamWatchdog(abortContext, (kind, error) => {
+    debugLog({
+      requestId,
+      event: "stream_watchdog",
+      kind,
+      message: String(error?.message ?? error),
+    });
+    metrics.observeError(
+      kind === "first_token"
+        ? "upstream_first_token_timeout"
+        : "upstream_idle_timeout",
+    );
+    metrics.breaker.recordFailure();
+  });
+  watchdog.start();
+
   const translator = createAnthropicStreamTranslator(requestBody, {
     estimatedInputTokens: TOKEN_ESTIMATE_ENABLED
       ? estimateChatRequestTokens(chatBody)
@@ -1163,8 +1283,9 @@ async function proxyAnthropicStream({
 
   try {
     for await (const rawChunk of upstream.body) {
+      watchdog.touch();
       if (res.destroyed || abortContext.signal.aborted) {
-        throw new Error("client disconnected");
+        throw abortContext.cause ?? new Error("client disconnected");
       }
       parser.push(rawChunk);
       while (parsedChunks.length) {
@@ -1179,14 +1300,17 @@ async function proxyAnthropicStream({
         for (const evt of translated) await anthropicSseWrite(res, evt);
       }
     }
+    watchdog.stop();
     parser.end();
     for (const evt of translator.end()) await anthropicSseWrite(res, evt);
     res.end();
   } catch (error) {
+    watchdog.stop();
     debugLog({
       requestId,
       path: "/v1/messages",
       streamError: String(error?.message ?? error),
+      abortCause: String(abortContext.cause?.message ?? abortContext.cause ?? ""),
     });
 
     if (cancellation.signal.aborted) {
@@ -1269,6 +1393,12 @@ async function handleApiRequest(req, res, metricState = null) {
         streaming: true,
         authenticatedApi: true,
         authMode: BRIDGE_AUTH_MODE,
+        protocols: {
+          responses: true,
+          chat_completions: true,
+          anthropic_messages: true,
+          anthropic_count_tokens: true,
+        },
       },
       requestId,
     );
@@ -1323,6 +1453,8 @@ async function handleApiRequest(req, res, metricState = null) {
         bridgeSecretConfigured: BRIDGE_AUTH_MODE === "bridge_secret",
         limits: {
           upstream_timeout_ms: UPSTREAM_TIMEOUT_MS,
+          first_token_timeout_ms: FIRST_TOKEN_TIMEOUT_MS,
+          stream_idle_timeout_ms: STREAM_IDLE_TIMEOUT_MS,
           max_body_bytes: MAX_BODY_BYTES,
           max_concurrent_requests: MAX_CONCURRENT_REQUESTS,
           response_state_ttl_ms: RESPONSE_STATE_TTL_MS,

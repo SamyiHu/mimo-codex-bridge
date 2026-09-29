@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -330,3 +330,92 @@ test("POST /v1/messages 非法请求返回 Anthropic 错误格式", async () => 
     await new Promise((resolve) => engine.close(resolve));
   }
 });
+
+
+test("上游首包超时：应快速报错而不是干等总超时", async () => {
+  const engine = http.createServer((req, res) => {
+    if (req.method === "GET" && req.url.startsWith("/v1/models")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: [{ id: "mimo-desktop/mimo-pro" }] }));
+      return;
+    }
+    // 挂起 SSE：写了 header 但永远不吐 chunk
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+    });
+    res.flushHeaders?.();
+    // 故意不 res.write / 不 res.end
+    sockets.add(res.socket);
+    res.on("close", () => sockets.delete(res.socket));
+  });
+  const sockets = new Set();
+  await listen(engine);
+
+  const bridgeToken = "watchdog-token";
+  const bridgeSecret = "watchdog-secret";
+  const bridgePort = await unusedPort();
+  const child = spawn(
+    process.execPath,
+    [
+      path.join(projectDir, "bridge.mjs"),
+      "--port",
+      String(bridgePort),
+      "--token",
+      bridgeToken,
+      "--bridge-secret",
+      bridgeSecret,
+      "--engine-url",
+      `http://127.0.0.1:${engine.address().port}`,
+    ],
+    {
+      cwd: projectDir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        MIMO_BRIDGE_FIRST_TOKEN_TIMEOUT_MS: "800",
+        MIMO_BRIDGE_STREAM_IDLE_TIMEOUT_MS: "800",
+      },
+    },
+  );
+
+  try {
+    await waitForHealth(bridgePort, child);
+    const started = Date.now();
+    const response = await fetch(
+      `http://127.0.0.1:${bridgePort}/v1/messages`,
+      {
+        method: "POST",
+        headers: {
+          "x-api-key": bridgeSecret,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({
+          model: "mimo-desktop/mimo-pro",
+          max_tokens: 32,
+          stream: true,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      },
+    );
+    const text = await response.text();
+    const elapsed = Date.now() - started;
+    assert.ok(
+      elapsed < 5000,
+      `should fail fast, took ${elapsed}ms`,
+    );
+    assert.match(text, /event: error/);
+    assert.match(text, /no data within|stream idle|headers timeout/i);
+  } finally {
+    child.kill();
+    await Promise.race([
+      once(child, "exit"),
+      new Promise((resolve) => setTimeout(resolve, 1000)),
+    ]);
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    for (const s of sockets) s.destroy();
+    await new Promise((resolve) => engine.close(resolve));
+  }
+});
+

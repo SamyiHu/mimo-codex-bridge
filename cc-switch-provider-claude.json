@@ -1,0 +1,18 @@
+{
+  "name": "Xiaomi MiMo (Desktop)",
+  "app": "claude",
+  "category": "custom",
+  "notes": "Local model-bridge Anthropic endpoint. Start the bridge first (启动 MiMo 桥 / model-bridge.ps1). Key = contents of bridge-secret.txt.",
+  "settings_config": {
+    "env": {
+      "ANTHROPIC_BASE_URL": "http://127.0.0.1:8788",
+      "ANTHROPIC_AUTH_TOKEN": "<填 bridge-secret.txt 的完整内容>",
+      "ANTHROPIC_API_KEY": "<填 bridge-secret.txt 的完整内容>",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mimo-desktop/mimo-v2.6-flash",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL": "mimo-desktop/mimo-v2.6-pro",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL": "mimo-desktop/mimo-v2.6-pro"
+    },
+    "modelType": "anthropic",
+    "effortLevel": "medium"
+  }
+}

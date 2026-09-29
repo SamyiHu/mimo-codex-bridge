@@ -584,6 +584,20 @@ bridge 模板只负责连接：
 
    脚本会自动备份，并把 MiMo 模型标为 `text + image`。这是可选工具，不会被启动脚本自动执行。
 
+### 在 cc-switch 中添加 Claude Code（Anthropic）
+
+Claude 侧不走 Codex 的 TOML，而是 JSON `settings_config`。仓库提供 `cc-switch-provider-claude.json`：
+
+- 应用：Claude
+- 名称：`Xiaomi MiMo (Desktop)`
+- Base URL：`http://127.0.0.1:8788`（不带 `/v1`，客户端会自行拼 `/v1/messages`）
+- Key：`bridge-secret.txt` 中的值（写入 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`）
+- 默认模型映射：
+  - Opus / Sonnet → `mimo-desktop/mimo-v2.6-pro`
+  - Haiku → `mimo-desktop/mimo-v2.6-flash`
+
+也可以直接在 cc-switch 里「添加供应商 → Claude → 粘贴 JSON」，切换后会写入 `~/.claude/settings.json`。
+
 ## 文件结构
 
 | 文件 | 作用 |
@@ -603,6 +617,7 @@ bridge 模板只负责连接：
 | `apply-mimo-provider.ps1` | 可选的 Codex provider 直写 / 恢复工具 |
 | `cc-switch-provider.toml` | MiMo 的 cc-switch 连接模板；模型由用户配置 |
 | `cc-switch-provider-workbuddy.toml` | WorkBuddy 的 cc-switch 连接模板；模型由用户配置 |
+| `cc-switch-provider-claude.json` | Claude Code 的 cc-switch 连接模板（Anthropic `/v1/messages`） |
 | `workbuddy-api-key.txt` | 本机 workbuddy2api API key，Git 忽略 |
 | `test/` | 不依赖真实模型的自动测试 |
 | `live-checks/codex-tool.mjs` | 可选的真实 Codex 工具调用测试 |

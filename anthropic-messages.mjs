@@ -33,24 +33,40 @@ function systemTextOf(system) {
   return "";
 }
 
-function toolResultText(content) {
-  if (content == null) return "";
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === "string") return part;
-        if (!part || typeof part !== "object") return "";
-        if (part.type === "text") return String(part.text ?? "");
-        if (part.type === "image") {
-          return "[image tool result omitted]";
-        }
-        return JSON.stringify(part);
-      })
-      .filter(Boolean)
-      .join("\n");
+function splitToolResult(content) {
+  if (content == null) return { text: "", attachments: [] };
+  if (typeof content === "string") return { text: content, attachments: [] };
+
+  const text = [];
+  const attachments = [];
+  const blocks = Array.isArray(content) ? content : [content];
+  for (const part of blocks) {
+    if (typeof part === "string") {
+      text.push(part);
+      continue;
+    }
+    if (!part || typeof part !== "object") continue;
+    if (part.type === "text") {
+      text.push(String(part.text ?? ""));
+      continue;
+    }
+    if (part.type === "image") {
+      try {
+        attachments.push(anthropicImageToChat(part));
+      } catch {
+        text.push("[unsupported image in tool result]");
+      }
+      continue;
+    }
+    text.push(JSON.stringify(part));
   }
-  return JSON.stringify(content);
+
+  if (attachments.length) {
+    text.push(
+      `[Multimodal tool output: ${attachments.length} media item(s) attached below.]`,
+    );
+  }
+  return { text: text.filter(Boolean).join("\n"), attachments };
 }
 
 function anthropicImageToChat(block) {
@@ -107,6 +123,49 @@ function parseToolInput(raw) {
   } catch {
     return { _raw: text };
   }
+}
+
+// JSON Schema 里这些关键字不是所有推理后端都认；原样透传可能导致上游
+// 校验卡住或参数异常。只保留通用字段。
+const SCHEMA_DROP_KEYS = new Set([
+  "$schema",
+  "$id",
+  "$ref",
+  "$defs",
+  "definitions",
+  "propertyNames",
+  "patternProperties",
+  "minItems",
+  "maxItems",
+  "uniqueItems",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "if",
+  "then",
+  "else",
+  "not",
+  "unevaluatedProperties",
+  "unevaluatedItems",
+  "dependentSchemas",
+  "dependentRequired",
+  "contentEncoding",
+  "contentMediaType",
+  "format",
+  "examples",
+  "deprecated",
+  "readOnly",
+  "writeOnly",
+]);
+
+function scrubJsonSchema(node) {
+  if (!node || typeof node !== "object") return node;
+  if (Array.isArray(node)) return node.map(scrubJsonSchema);
+  const out = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (SCHEMA_DROP_KEYS.has(key)) continue;
+    out[key] = scrubJsonSchema(value);
+  }
+  return out;
 }
 
 function textBlocksToChatParts(blocks) {
@@ -171,15 +230,37 @@ export function toChatRequestFromAnthropic(body, options = {}) {
   if (systemText) messages.push({ role: "system", content: systemText });
 
   let pendingToolCalls = [];
+  // 工具结果里的图片/附件不能塞进 tool 消息（MiMo tool 消息只收文本），
+  // 也不像 Responses 那样直接丢掉：延迟到同一组 tool 消息之后，以 user 多模态补发。
+  let deferredToolAttachments = [];
+  // 历史里可能残留空 name 的坏 tool_use（早期流式 bug 产物）。上游对
+  // 空工具名会直接报 Param Incorrect，这里丢弃调用，并把对应 tool_result
+  // 降级成普通文本，保证请求可被接受。
+  const droppedToolCallIds = new Set();
+
+  const flushToolAttachments = () => {
+    if (!deferredToolAttachments.length) return;
+    messages.push({
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "The following media items were returned by completed tool calls.",
+        },
+        ...deferredToolAttachments,
+      ],
+    });
+    deferredToolAttachments = [];
+  };
 
   const flushToolCalls = () => {
     if (!pendingToolCalls.length) return;
-    const text = pendingToolCalls
-      .map((call) => `Tool call ${call.function.name}(${call.function.arguments})`)
-      .join("\n");
+    // 与 responses.mjs / Chat 惯例对齐：纯 tool_calls 时 content 必须是 null。
+    // 以前把 arguments 整段再拼进 content，Write 的 SVG 会被复制一份，
+    // 请求体积翻倍，也容易让上游在超长 assistant 文本上卡住。
     messages.push({
       role: "assistant",
-      content: text || null,
+      content: null,
       tool_calls: pendingToolCalls,
     });
     pendingToolCalls = [];
@@ -202,6 +283,7 @@ export function toChatRequestFromAnthropic(body, options = {}) {
         : [];
 
     if (role === "assistant") {
+      flushToolAttachments();
       flushToolCalls();
       const textParts = [];
       for (const block of blocks) {
@@ -214,16 +296,23 @@ export function toChatRequestFromAnthropic(body, options = {}) {
           case "text":
             if (block.text) textParts.push({ type: "text", text: String(block.text) });
             break;
-          case "tool_use":
+          case "tool_use": {
+            const callId = String(block.id || uid("call_"));
+            const name = String(block.name ?? "").trim();
+            if (!name) {
+              droppedToolCallIds.add(callId);
+              break;
+            }
             pendingToolCalls.push({
-              id: String(block.id || uid("call_")),
+              id: callId,
               type: "function",
               function: {
-                name: String(block.name ?? ""),
+                name,
                 arguments: JSON.stringify(block.input ?? {}),
               },
             });
             break;
+          }
           case "thinking":
           case "redacted_thinking":
             // Chat 侧没有可回放的 thinking 状态。
@@ -271,15 +360,44 @@ export function toChatRequestFromAnthropic(body, options = {}) {
         case "image":
           userParts.push(anthropicImageToChat(block));
           break;
+        case "document":
+        case "file":
+        case "pdf":
+          // Chat 侧没有 document 通道；保留可读摘要，避免整条请求失败。
+          userParts.push({
+            type: "text",
+            text:
+              "[document omitted] " +
+              String(
+                block.source?.url ??
+                  block.source?.data?.slice?.(0, 32) ??
+                  block.id ??
+                  block.name ??
+                  "",
+              ),
+          });
+          break;
         case "tool_result": {
           flushToolCalls();
-          const toolContent = toolResultText(block.content);
+          const split = splitToolResult(block.content);
+          deferredToolAttachments.push(...split.attachments);
+          const rendered = block.is_error
+            ? `Error: ${split.text}`
+            : split.text;
+          const callId = String(block.tool_use_id ?? block.id ?? "");
+          if (!callId || droppedToolCallIds.has(callId)) {
+            // 坏 tool_use 对应的结果降级成用户文本，避免上游报
+            // "Tool result is missing" / "Param Incorrect"。
+            userParts.push({
+              type: "text",
+              text: `[tool result for ${callId || "unknown"}] ${rendered}`,
+            });
+            break;
+          }
           messages.push({
             role: "tool",
-            tool_call_id: String(block.tool_use_id ?? block.id ?? ""),
-            content: block.is_error
-              ? `Error: ${toolContent}`
-              : toolContent,
+            tool_call_id: callId,
+            content: rendered,
           });
           break;
         }
@@ -290,6 +408,7 @@ export function toChatRequestFromAnthropic(body, options = {}) {
 
     if (userParts.length) {
       flushToolCalls();
+      flushToolAttachments();
       const hasMedia = userParts.some((p) => p.type !== "text");
       if (hasMedia) {
         messages.push({ role: "user", content: userParts });
@@ -302,6 +421,7 @@ export function toChatRequestFromAnthropic(body, options = {}) {
     }
   }
   flushToolCalls();
+  flushToolAttachments();
 
   if (!messages.length) {
     throw protocolError("messages produced no chat content");
@@ -331,10 +451,10 @@ export function toChatRequestFromAnthropic(body, options = {}) {
         function: {
           name: String(tool.name),
           description: String(tool.description ?? ""),
-          parameters: tool.input_schema ?? {
+          parameters: scrubJsonSchema(tool.input_schema ?? {
             type: "object",
             properties: {},
-          },
+          }),
         },
       }));
     if (!chat.tools.length) delete chat.tools;
@@ -360,8 +480,9 @@ export function toChatRequestFromAnthropic(body, options = {}) {
     }
   }
 
-  // Anthropic thinking：有 budget 时映射到 reasoning_effort，供上游参考。
-  if (body.thinking?.type === "enabled" && options.mapThinkingToReasoning !== false) {
+  // Anthropic thinking：默认不映射到 reasoning_effort。多数 MiMo 模型不接受
+  // 该字段，映射过去只会换来 400；需要时由调用方显式打开。
+  if (body.thinking?.type === "enabled" && options.mapThinkingToReasoning === true) {
     const budget = Number(body.thinking.budget_tokens ?? 0);
     if (budget >= 10000) chat.reasoning_effort = "high";
     else if (budget >= 2000) chat.reasoning_effort = "medium";
@@ -509,10 +630,8 @@ export function createAnthropicStreamTranslator(request = {}, options = {}) {
     return events;
   };
 
-  const startToolBlock = (call) => {
+  const startToolBlock = (call, key) => {
     closeOpenBlock();
-    const key = String(call?.id || call?.index || state.nextIndex);
-    if (state.toolBlocks.has(key)) return events;
     const index = state.nextIndex++;
     const id = String(call?.id || uid("toolu_"));
     const name = String(call?.function?.name ?? call?.name ?? "");
@@ -587,13 +706,25 @@ export function createAnthropicStreamTranslator(request = {}, options = {}) {
         );
       }
 
+      // Chat SSE 的 tool_calls 按 index 分片：首片带 id/name，后续只带
+      // arguments 增量。必须用 index 归并，否则同一工具会被拆成多个块。
       const toolCalls = delta.tool_calls ?? [];
       for (const call of toolCalls) {
-        const key = String(call?.id || call?.index || "0");
-        if (!state.toolBlocks.has(key) && (call?.function?.name || call?.id || call?.index !== undefined)) {
-          startToolBlock({ ...call, id: call?.id || key });
+        const key =
+          call?.index !== undefined && call?.index !== null
+            ? String(call.index)
+            : String(call?.id || "0");
+        let entry = state.toolBlocks.get(key);
+        if (!entry) {
+          startToolBlock({ ...call, id: call?.id || key }, key);
+          entry = state.toolBlocks.get(key);
+        } else {
+          if (call?.id && entry.id.startsWith("toolu_") && !call.id.startsWith("toolu_")) {
+            entry.id = String(call.id);
+          }
+          const incomingName = call?.function?.name ?? call?.name;
+          if (incomingName && !entry.name) entry.name = String(incomingName);
         }
-        const entry = state.toolBlocks.get(key) ?? state.toolBlocks.values().next().value;
         if (!entry) continue;
         const args = call?.function?.arguments;
         if (typeof args === "string" && args) {
