@@ -1,17 +1,17 @@
-# mimo-codex-bridge
+# Codex Model Bridge
 
-让 **Codex** 通过本地桥接使用 **MiMo Desktop** 的模型能力。
+让 **Codex-compatible agents** 通过本地桥使用 **MiMo Desktop / WorkBuddy** 的模型能力。
 
 ```text
-Codex ── bridge-secret ──▶ mimo-bridge (127.0.0.1:8788)
+Codex ── bridge-secret ──▶ model-bridge (127.0.0.1:8788)
                               │
                               ├─ Responses ⇄ Chat Completions
                               ├─ 真实增量 SSE
                               ├─ 状态 / 指标 / 熔断
-                              └─ MiMo token ──▶ MiMo Desktop Engine
+                              └── MiMo token / WorkBuddy2API ──▶ MiMo Desktop / WorkBuddy Cloud
 ```
 
-当前版本：**2.5.0**。项目仅监听 `127.0.0.1`。MiMo Desktop 的内部接口不是稳定公开接口，客户端升级后可能需要再次适配。
+当前版本：**2.7.0**。项目仅监听 `127.0.0.1`。MiMo Desktop 与 WorkBuddy 的内部接口都不是稳定公开接口，客户端升级后可能需要再次适配。
 
 ## 两套凭据
 
@@ -39,7 +39,7 @@ Codex ── bridge-secret ──▶ bridge ── token.txt ──▶ MiMo Engi
 - 引擎连续失败 3 次后熔断 5 秒，并返回明确的 `503` 和 `Retry-After`。
 - 可重试的 `408`、`429` 和 `5xx` 会先重新发现引擎再重试一次。
 - 新增 `doctor.mjs`，自动检查 Node、bridge、MiMo 引擎、Codex 配置和实时请求。
-- 新增统一管理入口 `mimo-bridge.ps1`。
+- 新增统一管理入口 `model-bridge.ps1`。
 - 新增可选的 Windows 登录自启动任务。
 - 新增真实 Codex 工具调用测试。
 - 指标里上游真实 usage 与本地估算值分开统计（2.4 起缺失 usage 由估算器补齐，见下）。
@@ -61,7 +61,7 @@ Codex ── bridge-secret ──▶ bridge ── token.txt ──▶ MiMo Engi
 ```powershell
 npm run test:protocol-live
 # 或
-powershell -File .\mimo-bridge.ps1 protocol-live
+powershell -File .\model-bridge.ps1 protocol-live
 ```
 
 检查 MiMo 是否在未来版本中原生支持 Responses：
@@ -69,7 +69,7 @@ powershell -File .\mimo-bridge.ps1 protocol-live
 ```powershell
 npm run probe:native
 # 或
-powershell -File .\mimo-bridge.ps1 native-probe
+powershell -File .\model-bridge.ps1 native-probe
 ```
 
 探测报告写入 `reports\mimo-native-responses.json`。
@@ -90,8 +90,8 @@ powershell -File .\mimo-bridge.ps1 native-probe
 
 ## 2.5 启动、配置边界与上下文修复
 
-- 唯一推荐启动入口是 `启动 MiMo 桥.bat`；它只初始化 bridge 凭据并启动服务，不修改 Codex 的 model 或模型目录。
-- cc-switch 是一等配置路径。bridge 只提供 `model_providers.mimo` 连接能力，模型继续由 cc-switch / 用户管理。
+- 唯一推荐启动入口是 `启动模型桥.bat`；它只初始化 bridge 凭据并启动服务，不修改 Codex 的 model 或模型目录。
+- cc-switch 是一等配置路径。bridge 只提供 `model_providers.mimo` / `model_providers.workbuddy` 连接能力，模型继续由 cc-switch / 用户管理。
 - 新增可选 `configure-codex`：直接写 Codex provider，但默认仍不改 `model`、`model_catalog_json`；`restore-codex` 可恢复原配置。
 - 流式请求会向 MiMo 要求最终 usage chunk，Codex 的上下文统计优先使用上游真实 `prompt/completion/total_tokens`。
 - 上游缺失 usage 时才使用本地估算：文本采用 tokenx 多语言规则，图片按尺寸和 512px 分块计数，不再忽略图片。
@@ -109,10 +109,10 @@ powershell -File .\mimo-bridge.ps1 native-probe
 
 ## 快速开始
 
-双击 `启动 MiMo 桥.bat`。它只做三件事：生成/复用凭据、启动 bridge、显示状态。
+双击 `启动模型桥.bat`。它只做三件事：生成/复用凭据、启动 bridge、显示状态。默认使用 MiMo；命令行执行 `启动模型桥.bat workbuddy` 可启动 WorkBuddy 模式，`启动模型桥.bat workbuddy raw` 显式启用 Raw Chat。
 
 ```powershell
-powershell -File .\mimo-bridge.ps1 setup
+powershell -File .\model-bridge.ps1 setup
 ```
 
 然后在 **cc-switch 或 Codex 配置里自行选择模型**。bridge 不会写入默认模型，也不会接管模型目录。
@@ -120,11 +120,11 @@ powershell -File .\mimo-bridge.ps1 setup
 若不想使用 cc-switch，可显式写入 provider 连接段；该命令仍不修改 model / model_catalog_json：
 
 ```powershell
-powershell -File .\mimo-bridge.ps1 configure-codex
-powershell -File .\mimo-bridge.ps1 restore-codex
+powershell -File .\model-bridge.ps1 configure-codex
+powershell -File .\model-bridge.ps1 restore-codex
 ```
 
-无参数双击 `mimo-bridge.ps1` 时：bridge 在跑则显示 status；没跑则自动 start，窗口会停住显示结果，不会红窗一闪就关。
+无参数双击 `model-bridge.ps1` 时：bridge 在跑则显示 status；没跑则自动 start，窗口会停住显示结果，不会红窗一闪就关。
 
 ## 启动不起来 / 红窗一闪就关
 
@@ -133,14 +133,14 @@ powershell -File .\mimo-bridge.ps1 restore-codex
 1. **卡巴斯基 / 杀软误杀**  
    本仓库的 `node.exe` 子进程、`start-bridge.ps1`、`bridge.mjs`、`schtasks` 创建自启任务都可能被拦截，表现为：双击启动红字一闪、`spawn EPERM`、`Access is denied`、Codex 一直 `error sending request`。  
    请在卡巴斯基里为以下路径加**排除/信任**（或暂时退出防护再启动）：
-   - 本仓库目录（`...\mimo-codex-bridge`）
+   - 本仓库目录（当前 checkout 的历史目录名 `...\mimo-codex-bridge`）
    - `C:\Program Files\nodejs\node.exe`
    - 用户 Startup 目录下的 `MiMo-Codex-Bridge.bat`
    - `%USERPROFILE%\.mimo-bridge`
 2. **PowerShell 脚本编码**  
    Windows PowerShell 5.1 要求 `.ps1` 使用 **UTF-8 with BOM**。若你改过脚本后中文注释处解析失败，先给文件补 BOM。
 3. **权限**  
-   `mimo-bridge.ps1 install-startup` 需要能创建计划任务；无管理员权限时用 Startup 文件夹方案：
+   `model-bridge.ps1 install-startup` 需要能创建计划任务；无管理员权限时用 Startup 文件夹方案：
    `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\MiMo-Codex-Bridge.bat`
 4. **前置条件**  
    MiMo Desktop 已登录并运行；已执行 `node mint-token.mjs`；`token.txt` 与 `bridge-secret.txt` 存在。
@@ -172,40 +172,171 @@ codex exec `
 - `mimo-desktop/mimo-flash`
 - `mimo-desktop/mimo-auto`
 
+## 控制面板（推荐入口）
+
+不想记多个脚本时，用本地控制面板看状态、切换上游、启停 bridge：
+
+```powershell
+# 双击「打开控制面板.bat」，或：
+node panel.mjs
+# 打开 http://127.0.0.1:8791
+```
+
+面板只监听 `127.0.0.1`，功能：
+- **状态**：bridge / workbuddy2api 是否在线、当前上游、Codex provider 是否指向 bridge、key 是否齐全
+- **切换**：点卡片在 MiMo / WorkBuddy 之间切换（会自动重启 bridge）
+- **启停**：启动 / 重启 / 停止 bridge
+- **网关**：一键拉起 workbuddy2api（`~/.workbuddy2api/wb2api.exe`）；面板启动、切到 WorkBuddy 时也会自动拉起
+- **模型**：列出当前 bridge 可用模型 ID
+
+端口被占用时：`PANEL_PORT=8792 node panel.mjs`。
+
+WorkBuddy2API 部署目录默认 `C:\Users\<你>\.workbuddy2api`，可用 `WORKBUDDY2API_DIR` 覆盖。`start-bridge.ps1 -Upstream workbuddy` 也会尝试自动拉起网关。
+
+## WorkBuddy 模型后端（可选）
+
+可以把 **WorkBuddy / CodeBuddy 的内置模型**接到本地 bridge，再由 Codex 或其他
+OpenAI-compatible agent 负责规划与工具执行：
+
+```text
+Codex / 其他 Agent
+      │ Responses API + 本地工具
+      ▼
+model-bridge :8788
+      │ /v1/chat/completions + /v1/models
+      ▼
+workbuddy2api :7863
+      │ WorkBuddy 账号池、token 刷新、模型路由
+      ▼
+copilot.tencent.com
+```
+
+[WorkBuddy Manager](https://github.com/ithtelab/workbuddy-manager) 是这套上游的账号池
+管理面板。它发布包内的 `upstream/` 目录就是 MIT 许可的 `workbuddy2api` 源码；上游原始
+仓库已删除，因此新部署应使用该发布包中的源码。bridge 不复制账号池，只把它的
+OpenAI-compatible Chat API 作为可选 upstream。
+
+### 启动 WorkBuddy upstream
+
+先部署并启动 `workbuddy2api`，确认：
+
+```powershell
+curl.exe http://127.0.0.1:7863/healthz
+curl.exe http://127.0.0.1:7863/v1/models -H "Authorization: Bearer <workbuddy2api-api-key>"
+```
+
+把 `config.json` 中的 `api_key` 写入本仓库的 `workbuddy-api-key.txt`，然后启动 bridge：
+
+```powershell
+powershell -File .\model-bridge.ps1 setup `
+  -Upstream workbuddy `
+  -UpstreamUrl http://127.0.0.1:7863
+```
+
+也可以显式指定 key 文件或环境变量：
+
+```powershell
+powershell -File .\model-bridge.ps1 setup `
+  -Upstream workbuddy `
+  -UpstreamUrl http://127.0.0.1:7863 `
+  -UpstreamTokenFile C:\secure\workbuddy-api-key.txt
+
+$env:WORKBUDDY_API_KEY = "<workbuddy2api-api-key>"
+powershell -File .\model-bridge.ps1 setup -Upstream workbuddy
+```
+
+启动后从 bridge 读取模型 ID，**原样**填给 Codex / cc-switch，不要手动加
+`mimo-desktop/` 前缀：
+
+```powershell
+$secret = (Get-Content .\bridge-secret.txt -Raw).Trim()
+curl.exe http://127.0.0.1:8788/v1/models -H "Authorization: Bearer $secret"
+```
+
+典型 ID 为 `cn:deepseek-v4-flash`、`cn:glm-5.3`、`cn:kimi-k2.7`；`cn:` / `global:`
+是 workbuddy2api 的 realm 前缀，必须保留。Codex 的 agent loop、工具调用和本地文件
+操作仍由 Codex 负责；WorkBuddy 只负责模型推理与账号调度。
+
+### 在 cc-switch 中切换 WorkBuddy
+
+`cc-switch` 只负责 Codex 的 provider / model 配置；模型 ID 仍然由你选择。按下面顺序使用：
+
+1. 确认 `workbuddy2api` 已运行，且 `workbuddy-api-key.txt` 已写入它的 API key。
+2. 以 WorkBuddy upstream 启动 bridge：
+
+   ```powershell
+   powershell -File .\model-bridge.ps1 setup -Upstream workbuddy -UpstreamUrl http://127.0.0.1:7863
+   ```
+
+3. 在 cc-switch 添加供应商，配置文件使用 `cc-switch-provider-workbuddy.toml`：
+   - 名称：`Local AI Bridge (WorkBuddy)`
+   - Base URL：`http://127.0.0.1:8788/v1`
+   - Key：`bridge-secret.txt` 的完整内容
+4. 从 `/v1/models` 返回值中选择模型，模型字段必须保留 `cn:` / `global:` 前缀，例如 `cn:deepseek-v4-flash`、`cn:glm-5.3`、`cn:kimi-k2.7`。
+5. 保存并在 cc-switch 中切换到该 provider。Codex 负责 agent loop 和工具执行，WorkBuddy 只负责模型推理。
+
+要切回 MiMo，先把 bridge 切回 MiMo upstream：
+
+```powershell
+powershell -File .\model-bridge.ps1 setup -Upstream mimo
+```
+
+然后在 cc-switch 使用 `cc-switch-provider.toml`，并选择 `mimo-desktop/*` 模型。两个模板都只提供连接信息，不替你写 `model` 或 `model_catalog_json`。同一时间 `127.0.0.1:8788` 只能对应一个 bridge upstream，因此切换后端时要先重启 bridge。
+
+`workbuddy2api` 是非官方账号池网关，请仅使用本人授权账号并遵守对应服务条款。
+
+### 原生 Chat 暴露模式
+
+bridge 同时暴露 `/v1/chat/completions`。WorkBuddy upstream 默认使用 `ChatMode=raw`，会原样保留模型 ID 和请求字段，包括 `metadata`、`max_completion_tokens`、`tool_choice`、`parallel_tool_calls`、`stream_options`，适合 OpenAI Chat-compatible agent 直接连接：
+
+```text
+http://127.0.0.1:8788/v1/chat/completions
+Authorization: Bearer <bridge-secret.txt>
+```
+
+如需显式控制模式：
+
+```powershell
+powershell -File .\model-bridge.ps1 setup -Upstream workbuddy -ChatMode raw
+powershell -File .\model-bridge.ps1 setup -Upstream workbuddy -ChatMode compatible
+```
+
+官方 Claude Code 使用 Anthropic `/v1/messages` 协议，不是 OpenAI Chat；当前桥的 `/v1/chat/completions` 可供 Chat-compatible agent 使用，但不能直接当作 Claude Code 的 Anthropic API。
+
 ## 管理命令
 
-统一入口为 `mimo-bridge.ps1`：
+统一入口为 `model-bridge.ps1`。旧的 `mimo-bridge.ps1` 仍然可用，但只是兼容转发：
 
 ```powershell
 # 初始化凭据并启动（推荐）
-powershell -File .\mimo-bridge.ps1 setup
+powershell -File .\model-bridge.ps1 setup
 
 # 查看完整状态
-powershell -File .\mimo-bridge.ps1 status
+powershell -File .\model-bridge.ps1 status
 
 # 只看运行指标
-powershell -File .\mimo-bridge.ps1 metrics
+powershell -File .\model-bridge.ps1 metrics
 
 # 启动、停止、重启
-powershell -File .\mimo-bridge.ps1 start
-powershell -File .\mimo-bridge.ps1 stop
-powershell -File .\mimo-bridge.ps1 restart
+powershell -File .\model-bridge.ps1 start
+powershell -File .\model-bridge.ps1 stop
+powershell -File .\model-bridge.ps1 restart
 
 # 可选：只写 Codex provider；不改 model / 模型目录
-powershell -File .\mimo-bridge.ps1 configure-codex
-powershell -File .\mimo-bridge.ps1 restore-codex
+powershell -File .\model-bridge.ps1 configure-codex
+powershell -File .\model-bridge.ps1 restore-codex
 
 # 自动诊断
-powershell -File .\mimo-bridge.ps1 doctor
+powershell -File .\model-bridge.ps1 doctor
 
 # 查看最近的脱敏调试日志
-powershell -File .\mimo-bridge.ps1 logs
+powershell -File .\model-bridge.ps1 logs
 
 # 轮换 bridge secret，并自动更新 Codex 配置
-powershell -File .\mimo-bridge.ps1 rotate-secret
+powershell -File .\model-bridge.ps1 rotate-secret
 
 # 运行真实 Codex 工具调用测试
-powershell -File .\mimo-bridge.ps1 live-test
+powershell -File .\model-bridge.ps1 live-test
 ```
 
 轮换 bridge secret 不会更换 MiMo token，因此不会重建引擎令牌；只会更新 Codex ↔ bridge 之间的认证凭据。
@@ -221,8 +352,8 @@ curl.exe http://127.0.0.1:8788/health
 `/status` 和 `/metrics` 要求 bridge secret：
 
 ```powershell
-powershell -File .\mimo-bridge.ps1 status
-powershell -File .\mimo-bridge.ps1 metrics
+powershell -File .\model-bridge.ps1 status
+powershell -File .\model-bridge.ps1 metrics
 ```
 
 状态接口包含：
@@ -312,7 +443,7 @@ npm test
 ```powershell
 npm run test:protocol-live
 # 或
-powershell -File .\mimo-bridge.ps1 protocol-live
+powershell -File .\model-bridge.ps1 protocol-live
 ```
 
 该测试使用真实 MiMo 上游验证结构化输出、`previous_response_id`、响应查询、后台响应、响应删除、自定义工具和 logprobs 能力。
@@ -322,7 +453,7 @@ powershell -File .\mimo-bridge.ps1 protocol-live
 ```powershell
 npm run probe:native
 # 或
-powershell -File .\mimo-bridge.ps1 native-probe
+powershell -File .\model-bridge.ps1 native-probe
 ```
 
 ### 真实 Codex 工具测试
@@ -334,7 +465,7 @@ npm run test:live
 需要查看 Codex 实际调用了哪个自己的工具时：
 
 ```powershell
-powershell -File .\mimo-bridge.ps1 live-test -ShowCommands
+powershell -File .\model-bridge.ps1 live-test -ShowCommands
 ```
 
 详细模式读取 Codex 的 JSONL 事件，显示 `command_execution`、`function_call`、文件修改等结构化工具事件。输出会自动遮蔽 token、bridge secret、Authorization 和当前用户名目录。
@@ -342,7 +473,7 @@ powershell -File .\mimo-bridge.ps1 live-test -ShowCommands
 如果要连续观察多个 Codex 自己的工具调用：
 
 ```powershell
-powershell -File .\mimo-bridge.ps1 tools-demo -OpenReport
+powershell -File .\model-bridge.ps1 tools-demo -OpenReport
 # 或
 npm run demo:tools -- --open-report
 ```
@@ -362,13 +493,13 @@ npm run demo:tools -- --open-report
 
 ```powershell
 # 创建登录自启动任务
-powershell -File .\mimo-bridge.ps1 install-startup
+powershell -File .\model-bridge.ps1 install-startup
 
 # 删除任务
-powershell -File .\mimo-bridge.ps1 remove-startup
+powershell -File .\model-bridge.ps1 remove-startup
 ```
 
-任务名称为 `MiMo Codex Bridge`。即使 MiMo Desktop 启动得稍慢，bridge 也会继续运行，并在 `/health` 或下一次请求时重新发现引擎。
+计划任务名称为 `Codex Model Bridge`；旧的 `MiMo Codex Bridge` 任务可手动删除。即使 MiMo Desktop 启动得稍慢，bridge 也会继续运行，并在 `/health` 或下一次请求时重新发现引擎。
 
 ## 运行配置
 
@@ -377,14 +508,20 @@ powershell -File .\mimo-bridge.ps1 remove-startup
 | `MIMO_BRIDGE_PORT` | `8788` | bridge 端口 |
 | `MIMO_BRIDGE_DIR` | `~/.mimo-bridge` | token 绑定的实例目录 |
 | `MIMO_BRIDGE_PROCESS` | `Xiaomi MiMo.exe` | 用于端口发现的进程名 |
-| `MIMO_BRIDGE_ENGINE_URL` | 空 | 固定引擎 URL，跳过端口发现 |
+| `MIMO_BRIDGE_UPSTREAM_KIND` | `mimo` | 上游类型：`mimo` 或 `workbuddy` |
+| `MIMO_BRIDGE_CHAT_MODE` | `compatible` / `raw` | Chat 字段兼容模式；WorkBuddy 默认 `raw` |
+| `MIMO_BRIDGE_ENGINE_URL` | 空 / `http://127.0.0.1:7863` | 固定上游 URL，跳过 MiMo 端口发现 |
+| `MIMO_BRIDGE_UPSTREAM_TOKEN_FILE` | `token.txt` / `workbuddy-api-key.txt` | 上游 API key 文件 |
+| `WORKBUDDY_API_KEY` | 空 | 可选的 workbuddy2api API key，优先于文件 |
+| `WORKBUDDY_API_KEY_FILE` | 空 | 可选的 workbuddy2api API key 文件 |
 | `MIMO_BRIDGE_SECRET` | 空 | 显式指定 bridge secret，优先于文件 |
 | `MIMO_BRIDGE_UPSTREAM_TIMEOUT_MS` | `600000` | 上游请求总超时 |
 | `MIMO_BRIDGE_MAX_BODY_BYTES` | `20971520` | 请求体上限 |
 | `MIMO_BRIDGE_MAX_CONCURRENT` | `8` | 模型请求最大并发数 |
 | `MIMO_BRIDGE_BREAKER_FAILURES` | `3` | 触发熔断的连续失败次数 |
 | `MIMO_BRIDGE_BREAKER_COOLDOWN_MS` | `5000` | 熔断冷却时间 |
-| `MIMO_BRIDGE_MODEL_FALLBACK` | `mimo-desktop/mimo-v2.6-pro` | 请求了引擎上不存在的模型时的兜底模型；`off` 关闭兜底 |
+| `MIMO_BRIDGE_MODEL_PREFIX` | `mimo-desktop` / `off` | 无 namespace 模型的前缀；WorkBuddy 模式默认关闭 |
+| `MIMO_BRIDGE_MODEL_FALLBACK` | `mimo-desktop/mimo-v2.6-pro` / `off` | 未知模型兜底；WorkBuddy 模式默认关闭 |
 | `MIMO_BRIDGE_TOKEN_ESTIMATE` | `1` | 上游缺失 usage 时是否本地估算补齐；`off` 关闭 |
 | `MIMO_BRIDGE_RESPONSE_TTL_MS` | `1800000` | `store=false` 的闲置状态保留时间 |
 | `MIMO_BRIDGE_RESPONSE_STATE_MAX` | `5000` | Responses 状态上限；活动和 `store=true` 不会被淘汰 |
@@ -424,17 +561,21 @@ bridge 模板只负责连接：
 
 | 文件 | 作用 |
 | --- | --- |
-| `bridge.mjs` | 协议桥接、认证、端口发现、流式代理、熔断 |
+| `bridge.mjs` | MiMo / WorkBuddy upstream、Responses 协议桥接、认证、流式代理、熔断 |
 | `responses.mjs` | Responses ⇄ Chat Completions 转换与 SSE 解析 |
 | `protocol-state.mjs` | Responses 状态持久化、TTL、取消和淘汰管理 |
 | `runtime.mjs` | 指标、并发限制、错误分类与熔断器 |
 | `token-estimate.mjs` | 上游缺失 usage 时的本地 token 估算器 |
 | `mint-token.mjs` | 生成凭据、写入 MiMo token 存储、设置 ACL |
 | `doctor.mjs` | bridge、MiMo 与 Codex 配置诊断 |
-| `mimo-bridge.ps1` | 统一管理、诊断、可选配置与自启动入口 |
-| `启动 MiMo 桥.bat` | 唯一推荐的双击入口；只搭桥，不选模型 |
+| `model-bridge.ps1` | 统一管理、诊断、可选配置与自启动入口 |
+| `mimo-bridge.ps1` | 旧名称兼容入口，转发到 `model-bridge.ps1` |
+| `启动模型桥.bat` | 唯一推荐的双击入口；只搭桥，不选模型 |
+| `启动 MiMo 桥.bat` | 旧名称兼容入口，转发到 `启动模型桥.bat` |
 | `apply-mimo-provider.ps1` | 可选的 Codex provider 直写 / 恢复工具 |
-| `cc-switch-provider.toml` | cc-switch 连接模板；模型由用户配置 |
+| `cc-switch-provider.toml` | MiMo 的 cc-switch 连接模板；模型由用户配置 |
+| `cc-switch-provider-workbuddy.toml` | WorkBuddy 的 cc-switch 连接模板；模型由用户配置 |
+| `workbuddy-api-key.txt` | 本机 workbuddy2api API key，Git 忽略 |
 | `test/` | 不依赖真实模型的自动测试 |
 | `live-checks/codex-tool.mjs` | 可选的真实 Codex 工具调用测试 |
 | `live-checks/protocol-live.mjs` | 真实 MiMo Responses 协议能力测试 |

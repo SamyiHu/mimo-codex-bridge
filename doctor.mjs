@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * mimo-bridge doctor — 检查 Node、bridge、MiMo 引擎、Codex 配置和可选实时请求。
+ * model-bridge doctor — 检查 Node、bridge、模型上游、Codex 配置和可选实时请求。
  * 不输出任何凭据内容。
  */
 import fs from "node:fs";
@@ -20,10 +20,24 @@ const configPath = argOf(
   "--config",
   path.join(os.homedir(), ".codex", "config.toml"),
 );
+const upstreamKind = (
+  argOf(
+    "--upstream-kind",
+    process.env.MIMO_BRIDGE_UPSTREAM_KIND || "mimo",
+  ) || "mimo"
+).toLowerCase();
+const upstreamTokenFile = argOf(
+  "--upstream-token-file",
+  process.env.MIMO_BRIDGE_UPSTREAM_TOKEN_FILE ||
+    process.env.WORKBUDDY_API_KEY_FILE ||
+    path.join(
+      projectDir,
+      upstreamKind === "workbuddy" ? "workbuddy-api-key.txt" : "token.txt",
+    ),
+);
 const liveRequest = !hasFlag("--no-live-request");
 const bridgeBase = `http://127.0.0.1:${port}`;
 const bridgeSecretFile = path.join(projectDir, "bridge-secret.txt");
-const mimoTokenFile = path.join(projectDir, "token.txt");
 /**
  * 读凭据文件。读不到（不存在或权限不足）时返回 null 而不是抛栈：
  * doctor 的职责是报告问题，而不是自己先崩掉。
@@ -41,8 +55,13 @@ function readCredential(file, fallback) {
   }
 }
 
-const mimoToken = readCredential(mimoTokenFile, "");
-const bridgeSecret = readCredential(bridgeSecretFile, mimoToken);
+const upstreamToken = readCredential(
+  upstreamTokenFile,
+  process.env.WORKBUDDY_API_KEY ||
+    process.env.MIMO_BRIDGE_UPSTREAM_API_KEY ||
+    "",
+);
+const bridgeSecret = readCredential(bridgeSecretFile, upstreamToken);
 const checks = [];
 
 function check(name, ok, detail, required = true) {
@@ -130,26 +149,27 @@ if (bridgeSecret) {
   check("bridge_status_auth", false, "bridge-secret.txt not found");
 }
 
-if (status?.engine && mimoToken) {
+let availableModels = [];
+if (status?.engine && upstreamToken) {
   try {
     const modelsUrl =
       `${status.engine}/v1/models` +
       `?directory=${encodeURIComponent(status.instanceDir)}`;
     const result = await fetchJson(modelsUrl, {
-      headers: { Authorization: `Bearer ${mimoToken}` },
+      headers: { Authorization: `Bearer ${upstreamToken}` },
     });
     const models = Array.isArray(result.payload?.data)
       ? result.payload.data.map((model) => String(model?.id || ""))
       : [];
+    availableModels = models;
+    const expectedModel = upstreamKind === "workbuddy"
+      ? models.some((model) => model.includes(":"))
+      : models.some((model) => model.startsWith("mimo-desktop/"));
     check(
       "mimo_engine_models",
-      result.response.ok &&
-      models.some(
-        (model) =>
-          model.startsWith("mimo-desktop/") || model.startsWith("xiaomi/"),
-      ),
+      result.response.ok && expectedModel,
       result.response.ok
-        ? `${models.length} model(s); MiMo desktop models detected=${models.some((model) => model.startsWith("mimo-desktop/"))}`
+        ? `${models.length} model(s); upstream=${upstreamKind}; expected model namespace detected=${expectedModel}`
         : `HTTP ${result.response.status}`,
     );
   } catch (error) {
@@ -180,7 +200,7 @@ if (fs.existsSync(configPath)) {
     bridgeSecret && configuredSecret === bridgeSecret;
   check(
     "codex_config",
-    provider === "mimo" &&
+    (provider === "mimo" || provider === "workbuddy") &&
       baseUrl === `${bridgeBase}/v1` &&
       wireApi === "responses" &&
       secretMatches,
@@ -210,7 +230,12 @@ if (liveRequest && status?.ok && bridgeSecret) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: configModel,
+          model:
+            upstreamKind === "workbuddy"
+              ? availableModels.find((model) => model.includes(":")) ||
+                availableModels[0] ||
+                configModel
+              : configModel,
           input: "Reply with OK only.",
           stream: false,
         }),
@@ -226,7 +251,7 @@ if (liveRequest && status?.ok && bridgeSecret) {
       "live_model_request",
       result.response.ok && outputText.trim().length > 0,
       result.response.ok
-        ? `model=${result.payload?.model || configModel} output_length=${outputText.trim().length}`
+        ? `model=${result.payload?.model || "unknown"} output_length=${outputText.trim().length}`
         : result.payload?.error?.message || `HTTP ${result.response.status}`,
     );
   } catch (error) {

@@ -1,0 +1,23 @@
+﻿# cc-switch -> Codex -> Add provider -> Config
+# Name: Local AI Bridge (WorkBuddy)
+# Base URL: http://127.0.0.1:8788/v1
+# Key: full contents of bridge-secret.txt
+#
+# Start the bridge in WorkBuddy mode first:
+#   powershell -File .\model-bridge.ps1 setup -Upstream workbuddy -UpstreamUrl http://127.0.0.1:7863
+#
+# This template intentionally does not set model or model_catalog_json.
+# Select a WorkBuddy model ID from /v1/models in cc-switch, for example:
+#   cn:deepseek-v4-flash
+#   cn:glm-5.3
+#   cn:kimi-k2.7
+
+model_provider = "workbuddy"
+web_search = "disabled"
+
+[model_providers.workbuddy]
+name = "workbuddy"
+base_url = "http://127.0.0.1:8788/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "<replace-with-full-bridge-secret.txt>"
