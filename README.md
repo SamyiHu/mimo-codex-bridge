@@ -172,6 +172,27 @@ codex exec `
 - `mimo-desktop/mimo-flash`
 - `mimo-desktop/mimo-auto`
 
+## 控制面板（推荐入口）
+
+不想记多个脚本时，用本地控制面板看状态、切换上游、启停 bridge：
+
+```powershell
+# 双击「打开控制面板.bat」，或：
+node panel.mjs
+# 打开 http://127.0.0.1:8791
+```
+
+面板只监听 `127.0.0.1`，功能：
+- **状态**：bridge / workbuddy2api 是否在线、当前上游、Codex provider 是否指向 bridge、key 是否齐全
+- **切换**：点卡片在 MiMo / WorkBuddy 之间切换（会自动重启 bridge）
+- **启停**：启动 / 重启 / 停止 bridge
+- **网关**：一键拉起 workbuddy2api（`~/.workbuddy2api/wb2api.exe`）；面板启动、切到 WorkBuddy 时也会自动拉起
+- **模型**：列出当前 bridge 可用模型 ID
+
+端口被占用时：`PANEL_PORT=8792 node panel.mjs`。
+
+WorkBuddy2API 部署目录默认 `C:\Users\<你>\.workbuddy2api`，可用 `WORKBUDDY2API_DIR` 覆盖。`start-bridge.ps1 -Upstream workbuddy` 也会尝试自动拉起网关。
+
 ## WorkBuddy 模型后端（可选）
 
 可以把 **WorkBuddy / CodeBuddy 的内置模型**接到本地 bridge，再由 Codex 或其他

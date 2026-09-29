@@ -73,6 +73,53 @@ if ($UpstreamUrl) { $nodeArgs += @("--engine-url", $UpstreamUrl) }
 if ($UpstreamTokenFile) { $nodeArgs += @("--token-file", $UpstreamTokenFile) }
 if ($ChatMode) { $nodeArgs += @("--chat-mode", $ChatMode) }
 
+# WorkBuddy 上游：一并拉起 workbuddy2api 网关（已在跑则跳过）
+if ($Upstream -eq "workbuddy") {
+    $gateDir = if ($env:WORKBUDDY2API_DIR) { $env:WORKBUDDY2API_DIR } else { Join-Path $env:USERPROFILE ".workbuddy2api" }
+    $gateExe = Join-Path $gateDir "wb2api.exe"
+    $gateUrl = if ($UpstreamUrl) { $UpstreamUrl } else { "http://127.0.0.1:7863" }
+    $gateHealthy = $false
+    try {
+        $probe = Invoke-WebRequest -Uri "$gateUrl/healthz" -TimeoutSec 2 -UseBasicParsing
+        $gateHealthy = $true
+        Write-Host "workbuddy2api 已在运行。" -ForegroundColor DarkGray
+    } catch { $gateHealthy = $false }
+
+    if (-not $gateHealthy) {
+        if (Test-Path -LiteralPath $gateExe) {
+            Write-Host "启动 workbuddy2api 网关…" -ForegroundColor Cyan
+            $gateLogDir = Join-Path $gateDir "data"
+            if (-not (Test-Path $gateLogDir)) { New-Item -ItemType Directory -Path $gateLogDir | Out-Null }
+            $gatePidFile = Join-Path $gateDir "wb2api.pid"
+            Start-Process -FilePath $gateExe `
+                -ArgumentList "-config","config.json" `
+                -WorkingDirectory $gateDir `
+                -WindowStyle Hidden `
+                -RedirectStandardOutput (Join-Path $gateLogDir "server.out.log") `
+                -RedirectStandardError (Join-Path $gateLogDir "server.err.log") `
+                -PassThru | ForEach-Object {
+                    [System.IO.File]::WriteAllText($gatePidFile, [string]$_.Id)
+                }
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                Start-Sleep -Milliseconds 400
+                try {
+                    Invoke-WebRequest -Uri "$gateUrl/healthz" -TimeoutSec 2 -UseBasicParsing | Out-Null
+                    Write-Host "workbuddy2api 已就绪。" -ForegroundColor Green
+                    $gateHealthy = $true
+                    break
+                } catch { }
+            }
+            if (-not $gateHealthy) {
+                Write-Host "workbuddy2api 已拉起但 healthz 未就绪，bridge 可能连不上。" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "找不到 workbuddy2api：$gateExe" -ForegroundColor Yellow
+            Write-Host "请部署后重试，或设置 WORKBUDDY2API_DIR。" -ForegroundColor Yellow
+        }
+    }
+}
+
 if ($Foreground) {
     Write-StartLog "foreground start on port $Port upstream=$Upstream chat=$ChatMode"
     & node @nodeArgs 2>&1 | Tee-Object -FilePath $logFile
