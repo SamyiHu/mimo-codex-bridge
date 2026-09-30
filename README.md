@@ -11,7 +11,7 @@ Codex ── bridge-secret ──▶ model-bridge (127.0.0.1:8788)
                               └── MiMo token / WorkBuddy2API ──▶ MiMo Desktop / WorkBuddy Cloud
 ```
 
-当前版本：**2.7.0**。项目仅监听 `127.0.0.1`。MiMo Desktop 与 WorkBuddy 的内部接口都不是稳定公开接口，客户端升级后可能需要再次适配。
+当前版本：**2.8.0**。项目仅监听 `127.0.0.1`。MiMo Desktop 与 WorkBuddy 的内部接口都不是稳定公开接口，客户端升级后可能需要再次适配。
 
 ## 两套凭据
 
@@ -171,6 +171,15 @@ codex exec `
 - `mimo-desktop/mimo-pro`（当前代 Pro 别名）
 - `mimo-desktop/mimo-flash`
 - `mimo-desktop/mimo-auto`
+
+### MiMo 思考开关
+
+MiMo Desktop 的 reasoning 能力是 toggle，不是低 / 中 / 高多档：
+
+- `low`、`minimal`、`none`、`off`：关闭思考
+- `high`、`xhigh`、`max`、`ultra` 等其他档位：开启思考
+
+bridge 会在 MiMo upstream 上把多档 effort 归一化成这个开关；WorkBuddy 仍保留原来的多档 reasoning。v2.6 系列若完全拒绝 `reasoning_effort`，bridge 仍会按模型记忆并自动去掉该字段。
 
 ## 控制面板（推荐入口）
 

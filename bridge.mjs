@@ -709,6 +709,35 @@ async function applyModelFallback(base, chatBody) {
 const EFFORT_REJECTION_TTL_MS = 10 * 60 * 1000;
 const effortRejectionByModel = new Map();
 
+const MI_MO_REASONING_OFF = new Set([
+  "none",
+  "minimal",
+  "off",
+  "false",
+  "disabled",
+]);
+
+// MiMo Desktop 的 reasoning 能力是 toggle：只有思考开 / 思考关，
+// 不接受 Codex 的多档 effort。这里统一把任意非关闭档位压成 high，
+// 关闭档位直接删除字段，避免把 unsupported effort 发给上游。
+function normalizeMiMoReasoningToggle(chatBody) {
+  if (!chatBody || !Object.hasOwn(chatBody, "reasoning_effort")) return;
+  const raw = chatBody.reasoning_effort;
+  const normalized =
+    raw === true ? "high" : String(raw ?? "").trim().toLowerCase();
+  const enabled = raw !== false && raw !== null && !MI_MO_REASONING_OFF.has(normalized);
+  if (!enabled) {
+    delete chatBody.reasoning_effort;
+  } else {
+    chatBody.reasoning_effort = "high";
+  }
+  debugLog({
+    event: "mimo_reasoning_toggle",
+    model: chatBody.model,
+    enabled,
+  });
+}
+
 function stripRejectedReasoningEffort(chatBody) {
   if (RAW_CHAT) return;
   if (!chatBody || !Object.hasOwn(chatBody, "reasoning_effort")) return;
@@ -1664,7 +1693,9 @@ async function handleApiRequest(req, res, metricState = null) {
 
   if (isAnthropicMessages) {
     try {
-      chatBody = toChatRequestFromAnthropic(body);
+      chatBody = toChatRequestFromAnthropic(body, {
+        mapThinkingToReasoning: UPSTREAM_KIND === "mimo",
+      });
     } catch (error) {
       return sendAnthropicError(
         res,
@@ -1675,6 +1706,10 @@ async function handleApiRequest(req, res, metricState = null) {
       );
     }
     if (!RAW_CHAT) normalizeModel(chatBody);
+    if (UPSTREAM_KIND === "mimo" && isAnthropicMessages && body.thinking?.type === "enabled") {
+      chatBody.reasoning_effort = "high";
+    }
+    if (UPSTREAM_KIND === "mimo") normalizeMiMoReasoningToggle(chatBody);
     chatBody.stream = body.stream === true;
     if (chatBody.stream) {
       chatBody.stream_options = {
@@ -1706,6 +1741,8 @@ async function handleApiRequest(req, res, metricState = null) {
         error?.code || "invalid_request",
       );
     }
+
+    if (UPSTREAM_KIND === "mimo") normalizeMiMoReasoningToggle(chatBody);
 
     if (body.background === true) {
       // 控制器必须先建并登记，否则 cancel 端点拿不到可中断的东西，

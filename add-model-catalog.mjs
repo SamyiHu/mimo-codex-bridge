@@ -51,10 +51,9 @@ const template =
   ) ?? catalog.models[0];
 
 const level = (effort, description) => ({ effort, description });
-const BASIC_LEVELS = [
-  level("low", "Fast responses with lighter reasoning"),
-  level("medium", "Balances speed and reasoning depth"),
-  level("high", "Greater reasoning depth for complex problems"),
+const TOGGLE_LEVELS = [
+  level("low", "Thinking off"),
+  level("high", "Thinking on"),
 ];
 
 const definitions = [
@@ -78,25 +77,25 @@ const definitions = [
     slug: "mimo-desktop/mimo-pro",
     display_name: "MiMo Pro",
     description:
-      "MiMo Pro (stable, supports reasoning effort) via MiMo Desktop bridge",
+      "MiMo Pro (stable, thinking toggle) via MiMo Desktop bridge",
     priority: 1008,
-    reasoning: BASIC_LEVELS,
+    reasoning: TOGGLE_LEVELS,
   },
   {
     slug: "mimo-desktop/mimo-flash",
     display_name: "MiMo Flash",
     description:
-      "MiMo Flash (stable, supports reasoning effort) via MiMo Desktop bridge",
+      "MiMo Flash (stable, thinking toggle) via MiMo Desktop bridge",
     priority: 1007,
-    // 2026-09-25 实测接受 reasoning_effort=high（v2.6-flash 不接受）。
-    reasoning: BASIC_LEVELS,
+    // MiMo 的 reasoning 能力是 toggle：low 表示关思考，high 表示开思考。
+    reasoning: TOGGLE_LEVELS,
   },
   {
     slug: "mimo-desktop/mimo-auto",
     display_name: "MiMo Auto",
     description: "Xiaomi MiMo Auto via MiMo Desktop bridge",
     priority: 1006,
-    reasoning: BASIC_LEVELS,
+    reasoning: TOGGLE_LEVELS,
   },
 ];
 
