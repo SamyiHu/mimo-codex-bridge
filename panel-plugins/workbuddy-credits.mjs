@@ -361,7 +361,8 @@ export default {
         <style>
           #wbc-checkin-out {
             display: none; margin: 8px 0 0; padding: 10px 12px;
-            background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+            background: var(--panel-2); border: 1px solid var(--line);
+            border-left: 2px solid var(--accent); border-radius: 8px;
             color: var(--ink); font: 12px/1.6 ui-monospace, Consolas, monospace;
             white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow: auto;
           }
@@ -397,6 +398,16 @@ export default {
         }
         var accountsCache = [];
         var adminHint = false;
+        // 实查缓存：uid -> {remain, time}。账号行优先显示实查值；
+        // 网关 /status 的 credits 只在定时签到（09/21 点）被官方余额覆盖，
+        // 白天领的礼包/任务积分不回写，直接显示会与实时值差一大截
+        var creditsCache = {};
+
+        function fmtBalance(a) {
+          var c = creditsCache[a.uid];
+          if (c) return "积分 " + c.remain + "（" + c.time + " 实查）";
+          return "余额 " + (a.credits != null ? a.credits : "—") + "（签到快照）";
+        }
 
         function ledgerText(a) {
           var mc = a.model_costs || [];
@@ -424,17 +435,17 @@ export default {
           accountsCache = accs;
           accs.forEach(function (a) {
             var flags =
-              (a.cooling ? ' <span class="chip">冷却</span>' : "") +
-              (a.disabled ? ' <span class="chip">自动禁用</span>' : "") +
-              (a.manual_disabled ? ' <span class="chip">手动停用</span>' : "") +
-              ((a.rate_limited_models || []).length ? ' <span class="chip">限流 ' + a.rate_limited_models.length + "</span>" : "");
+              (a.cooling ? ' <span class="chip warn">冷却</span>' : "") +
+              (a.disabled ? ' <span class="chip err">自动禁用</span>' : "") +
+              (a.manual_disabled ? ' <span class="chip err">手动停用</span>' : "") +
+              ((a.rate_limited_models || []).length ? ' <span class="chip warn">限流 ' + a.rate_limited_models.length + "</span>" : "");
             var acts =
               (a.manual_disabled ? act("启用", "enable:" + a.uid) : act("停用", "disable:" + a.uid)) +
               act("复活", "revive:" + a.uid) +
               act("台账", "ledger:" + a.uid);
             html += row(
               (a.nickname || String(a.uid || "").slice(0, 8)) + (a.realm ? " · " + a.realm : ""),
-              "余额 " + (a.credits != null ? a.credits : "—") + " · 成功 " + (a.success_count || 0) + " 次" +
+              fmtBalance(a) + " · 成功 " + (a.success_count || 0) + " 次" +
                 ((a.model_costs || []).length ? " · 台账 " + a.model_costs.length + " 模型" : "") + flags + " " + acts,
             );
           });
@@ -531,26 +542,37 @@ export default {
           if (span) span.textContent = on ? "执行中…" : label;
         }
 
-        async function doReport() {
+        var reportRunning = false;
+        async function doReport(silent) {
+          if (reportRunning) return;
+          reportRunning = true;
           var btn = byId("wbc-report");
           var body = byId("wbc-report-body");
-          busy(btn, true, "刷新积分日报");
-          body.innerHTML = '<div class="empty">正在实查上游余额，多账号时可能要等一会…</div>';
+          if (!silent) {
+            busy(btn, true, "刷新积分日报");
+            body.innerHTML = '<div class="empty">正在实查上游余额，多账号时可能要等一会…</div>';
+          }
           try {
             var r = await fetch(BASE + "/report", { method: "POST" });
             var d = await r.json();
             if (!d.ok) {
-              body.innerHTML = '<div class="empty"><span class="dot err"></span>' + esc(d.error) + "</div>";
+              if (!silent) body.innerHTML = '<div class="empty"><span class="dot err"></span>' + esc(d.error) + "</div>";
               return;
             }
             var rep = d.report || {};
             var total = rep.total || {};
             var accs = Array.isArray(rep.accounts) ? rep.accounts : [];
+            var fetchedAt = new Date(d.at).toLocaleTimeString("zh-CN", { hour12: false });
+            accs.forEach(function (a) {
+              if (a.uid) creditsCache[a.uid] = { remain: a.remain, time: fetchedAt };
+            });
+            loadAll();
+            if (silent) return;
             var html =
               row("积分日报", '<span class="dot ok"></span>剩余 ' + (total.remain != null ? total.remain : "—") +
                 " · 已用 " + (total.used != null ? total.used : "—") +
                 " · 总量 " + (total.size != null ? total.size : "—") +
-                " · " + new Date(d.at).toLocaleTimeString("zh-CN", { hour12: false }));
+                " · " + fetchedAt);
             accs.forEach(function (a) {
               html += row(
                 (a.nickname || String(a.uid || "").slice(0, 8)) + (a.ok ? "" : " · 失败"),
@@ -560,9 +582,10 @@ export default {
             });
             body.innerHTML = html;
           } catch (e) {
-            body.innerHTML = '<div class="empty"><span class="dot err"></span>' + esc(String(e)) + "</div>";
+            if (!silent) body.innerHTML = '<div class="empty"><span class="dot err"></span>' + esc(String(e)) + "</div>";
           } finally {
-            busy(btn, false, "刷新积分日报");
+            reportRunning = false;
+            if (!silent) busy(btn, false, "刷新积分日报");
             loadAll();
           }
         }
@@ -589,7 +612,7 @@ export default {
           }
         }
 
-        byId("wbc-report").addEventListener("click", doReport);
+        byId("wbc-report").addEventListener("click", function () { doReport(false); });
         byId("wbc-checkin").addEventListener("click", doCheckin);
         byId("wbc-admin-ensure").addEventListener("click", ensureAdmin);
 
@@ -664,6 +687,8 @@ export default {
         });
 
         loadAll();
+        // 首次加载自动静默实查一次积分，账号行直接显示实时值（与 Trae 卡同款；失败静默）
+        setTimeout(function () { doReport(true); }, 800);
         setInterval(loadAll, 15000);
       })();
       </script>

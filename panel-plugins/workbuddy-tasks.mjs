@@ -209,14 +209,12 @@ export default {
         <style>
           #wbt-out {
             display: none; margin: 8px 0 0; padding: 10px 12px;
-            background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+            background: var(--panel-2); border: 1px solid var(--line);
+            border-left: 2px solid var(--accent); border-radius: 8px;
             color: var(--ink); font: 12px/1.6 ui-monospace, Consolas, monospace;
             white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow: auto;
           }
           #wbt-out.show { display: block; }
-          #wbt-tasks .toggle {
-            cursor: pointer; user-select: none; margin-left: 6px;
-          }
         </style>
         <div class="actions" style="margin-top: 8px;">
           <button class="btn" type="button" id="wbt-dry"><span class="btn-label">查询成长任务 (dry-run)</span></button>
@@ -257,13 +255,12 @@ export default {
               : '<span class="dot err"></span>离线（定时任务不运行）',
           );
           (d.tasks || []).forEach(function (t) {
-            var state = t.enabled
-              ? '<span class="dot ok"></span>开'
-              : '<span class="dot err"></span>关';
             html += row(
               t.name,
-              state + ' <span class="toggle" data-key="' + esc(t.key) + '" data-enabled="' + (t.enabled ? "0" : "1") + '">切换</span>' +
-                " · " + t.hours.join("/") + " 点 · 下次 " + esc(t.nextRun) + " " + fmtIn(t.nextInMin),
+              '<span class="tsched">' + (t.enabled ? "开" : "关") + " · " +
+                t.hours.join("/") + " 点 · 下次 " + esc(t.nextRun) + " " + fmtIn(t.nextInMin) + "</span>" +
+                '<span class="toggle ' + (t.enabled ? "on" : "off") + '" data-key="' + esc(t.key) +
+                '" data-enabled="' + (t.enabled ? "0" : "1") + '" title="点击' + (t.enabled ? "停用" : "启用") + '"><i></i></span>',
             );
           });
           if (d.taskRunnerExists === false) {

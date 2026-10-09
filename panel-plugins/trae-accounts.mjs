@@ -198,7 +198,8 @@ export default {
           #wtr-import-area .hint { color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
           #wtr-out {
             display: none; margin: 8px 0 0; padding: 10px 12px;
-            background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+            background: var(--panel-2); border: 1px solid var(--line);
+            border-left: 2px solid var(--accent); border-radius: 8px;
             color: var(--ink); font: 12px/1.6 ui-monospace, Consolas, monospace;
             white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow: auto;
           }
@@ -275,11 +276,11 @@ export default {
           var html = row("账号池", accs.length + " 个账号（" + accs.filter(function (a) { return a.enabled && !a.disabled; }).length + " 个可用）");
           accs.forEach(function (a) {
             var chips =
-              (a.disabled ? ' <span class="chip">硬禁用</span>' : "") +
-              (!a.enabled ? ' <span class="chip">已停用</span>' : "") +
-              (a.cooling ? ' <span class="chip">冷却</span>' : "") +
-              (a.expired_soon ? ' <span class="chip">临过期</span>' : "") +
-              (a.err_count ? ' <span class="chip">错误 ' + a.err_count + "</span>" : "");
+              (a.disabled ? ' <span class="chip err">硬禁用</span>' : "") +
+              (!a.enabled ? ' <span class="chip err">已停用</span>' : "") +
+              (a.cooling ? ' <span class="chip warn">冷却</span>' : "") +
+              (a.expired_soon ? ' <span class="chip warn">临过期</span>' : "") +
+              (a.err_count ? ' <span class="chip err">错误 ' + a.err_count + "</span>" : "");
             var acts =
               act(a.enabled ? "停用" : "启用", "toggle:" + a.uid) +
               act("改名", "rename:" + a.uid) +

@@ -778,24 +778,106 @@ function buildHtml(pluginCards) {
 
   /* 状态行：仅主状态卡固定最小高度防跳版；插件卡的 .rows 随内容收缩 */
   #statusBody { min-height: 220px; }
-  /* 插件卡的行内操作（停用/改名/切换 等）：小胶囊样式，可点击感 */
-  .wtr-act, .wbc-act, .wbt-tasks .toggle {
+
+  /* ── 插件卡片视觉（只作用于插件容器，不影响主面板）── */
+  /* 实体行（含操作按钮的账号行）做成内嵌小卡，与摘要表格行形成层级 */
+  #wbc-pool .row:has(.wbc-act),
+  #wtr-accounts .row:has(.wtr-act) {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin: 8px 0 0;
+    flex-wrap: wrap;
+    row-gap: 6px;
+    transition: border-color 0.15s;
+  }
+  #wbc-pool .row:has(.wbc-act):hover,
+  #wtr-accounts .row:has(.wtr-act):hover { border-color: rgba(45, 212, 191, 0.45); }
+  #wbc-pool .row:has(.wbc-act) .k,
+  #wtr-accounts .row:has(.wtr-act) .k {
+    color: var(--ink);
+    font-weight: 600;
+    font-size: 13px;
+  }
+
+  /* 行内操作胶囊：蓝=查看/编辑，琥珀=启停，绿=复活，红=删除 */
+  .wtr-act, .wbc-act {
     cursor: pointer;
     user-select: none;
     display: inline-block;
-    padding: 1px 9px;
-    margin-left: 4px;
-    border: 1px solid var(--line);
+    padding: 1px 10px;
+    margin-left: 6px;
+    border: 1px solid rgba(56, 189, 248, 0.35);
     border-radius: 999px;
     color: var(--accent-2);
+    background: rgba(56, 189, 248, 0.06);
     font-size: 12px;
     line-height: 18px;
-    transition: border-color 0.15s, color 0.15s;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
   }
-  .wtr-act:hover, .wbc-act:hover, .wbt-tasks .toggle:hover {
-    border-color: var(--accent);
-    color: var(--accent);
+  .wtr-act:hover, .wbc-act:hover {
+    border-color: var(--accent-2);
+    color: #bfe7ff;
+    background: rgba(56, 189, 248, 0.14);
   }
+  .wtr-act[data-act^="delete"], .wbc-act[data-act^="delete"] {
+    color: var(--err); border-color: rgba(248, 113, 113, 0.35); background: rgba(248, 113, 113, 0.06);
+  }
+  .wtr-act[data-act^="delete"]:hover {
+    color: #ffc9c9; border-color: var(--err); background: rgba(248, 113, 113, 0.14);
+  }
+  .wtr-act[data-act^="toggle"], .wbc-act[data-act^="disable"], .wbc-act[data-act^="enable"] {
+    color: var(--warn); border-color: rgba(251, 191, 36, 0.35); background: rgba(251, 191, 36, 0.06);
+  }
+  .wtr-act[data-act^="toggle"]:hover, .wbc-act[data-act^="disable"]:hover, .wbc-act[data-act^="enable"]:hover {
+    color: #ffe9b8; border-color: var(--warn); background: rgba(251, 191, 36, 0.14);
+  }
+  .wbc-act[data-act^="revive"] {
+    color: var(--ok); border-color: rgba(52, 211, 153, 0.35); background: rgba(52, 211, 153, 0.06);
+  }
+  .wbc-act[data-act^="revive"]:hover {
+    color: #c6f7e5; border-color: var(--ok); background: rgba(52, 211, 153, 0.14);
+  }
+
+  /* 语义 chip：warn=琥珀，err=红（插件渲染时加修饰类） */
+  .chip.warn { color: var(--warn); border-color: rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.08); }
+  .chip.err { color: var(--err); border-color: rgba(248, 113, 113, 0.4); background: rgba(248, 113, 113, 0.08); }
+
+  /* 任务开关：迷你 switch（.toggle 由插件渲染，<i> 为滑块） */
+  #wbt-tasks .toggle {
+    display: inline-flex;
+    align-items: center;
+    width: 40px;
+    height: 20px;
+    padding: 0 3px;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.18);
+    border: 1px solid rgba(148, 163, 184, 0.4);
+    cursor: pointer;
+    user-select: none;
+    vertical-align: middle;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  #wbt-tasks .toggle i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #94a3b8;
+    transition: transform 0.15s, background 0.15s;
+  }
+  #wbt-tasks .toggle.off i { transform: translateX(0); }
+  #wbt-tasks .toggle.on { background: rgba(45, 212, 191, 0.18); border-color: rgba(45, 212, 191, 0.55); }
+  #wbt-tasks .toggle.on i { transform: translateX(20px); background: var(--accent); }
+  #wbt-tasks .toggle:hover { border-color: var(--accent); }
+  /* 任务行：说明文字灰显，开关钉在行右缘成一条直线 */
+  #wbt-tasks .row .v {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+  }
+  #wbt-tasks .row .v .tsched { color: var(--muted); }
+  #wbt-tasks .row .v .toggle { flex: none; }
   .row {
     display: flex;
     justify-content: space-between;
