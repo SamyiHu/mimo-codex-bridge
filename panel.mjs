@@ -776,8 +776,26 @@ function buildHtml(pluginCards) {
   }
   .actions .btn { min-width: 120px; }
 
-  /* 状态行：固定最小高度，刷新不跳版 */
-  .rows { min-height: 220px; }
+  /* 状态行：仅主状态卡固定最小高度防跳版；插件卡的 .rows 随内容收缩 */
+  #statusBody { min-height: 220px; }
+  /* 插件卡的行内操作（停用/改名/切换 等）：小胶囊样式，可点击感 */
+  .wtr-act, .wbc-act, .wbt-tasks .toggle {
+    cursor: pointer;
+    user-select: none;
+    display: inline-block;
+    padding: 1px 9px;
+    margin-left: 4px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--accent-2);
+    font-size: 12px;
+    line-height: 18px;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .wtr-act:hover, .wbc-act:hover, .wbt-tasks .toggle:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
   .row {
     display: flex;
     justify-content: space-between;

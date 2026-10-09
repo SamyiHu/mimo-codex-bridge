@@ -262,7 +262,7 @@ export default {
               : '<span class="dot err"></span>关';
             html += row(
               t.name,
-              state + ' <span class="toggle" data-key="' + esc(t.key) + '" data-enabled="' + (t.enabled ? "0" : "1") + '">[切换]</span>' +
+              state + ' <span class="toggle" data-key="' + esc(t.key) + '" data-enabled="' + (t.enabled ? "0" : "1") + '">切换</span>' +
                 " · " + t.hours.join("/") + " 点 · 下次 " + esc(t.nextRun) + " " + fmtIn(t.nextInMin),
             );
           });

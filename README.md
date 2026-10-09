@@ -224,8 +224,24 @@ export default {
 
 内置插件：
 
-- **workbuddy-credits**（WorkBuddy 积分）：卡片实时轮询网关 `/status` 的账号池（每 15s，本地调用）；「刷新积分日报」调网关目录的 `credit.exe -json` 实查上游余额（会打上游接口，故手动触发）；「立即签到」调 `signin_bin.exe auths`（幂等，网关本身 09/21 点也有定时签到，这里是对账/补签入口）。
+- **workbuddy-credits**（WorkBuddy 积分 / 账号管理）：
+  - 池状态轮询（每 15s）：账号余额、成功次数、冷却/自动禁用/手动停用/模型限流标签、成本台账模型数；
+  - 用量统计行（`/v1/stats`）：请求数、成功率、token 量、缓存命中率、均速；
+  - 账号管理：每号 `停用 / 复活`，`台账` 查看每千 token 实测单价（model_costs）；走网关
+    `/admin/accounts/{uid}/disable|enable|revive`，默认未开——「开启管理端点并重启网关」一键写
+    `admin.enabled=true` 并重启生效；
+  - **面板内 OAuth 登录新增账号**（cn/global 可选）：驱动网关预构建的 `login.exe`——生成授权链接
+    → 浏览器完成登录 → 面板轮询拿 token 自动落盘 `auths/workbuddy-<uid>.json`（cn 顺带幂等首签）；
+    网关 `StartAuthDirWatch` 监听 auths 目录，新账号**自动入池无需重启**；
+  - 「刷新积分日报」`credit.exe -json` 实查上游余额；「立即签到」`signin_bin.exe auths`（幂等）。
 - **workbuddy-tasks**（WorkBuddy 自动任务）：总览六类定时积分任务（签到/猫猫旅行/活跃地图/保活/开学季/夜猫子）的开关、执行时刻与下次运行估算；点 `[切换]` 改写网关 `config.json` 的 `schedule.*_enabled`，「重启网关（应用开关）」负责生效（kill + 拉起 wb2api.exe 并等 healthz）；「查询成长任务 (dry-run)」和「完成+领奖 (--yes)」直接驱动网关的 `scripts/task_runner.py`（成长任务一体机，--yes 有确认弹窗，动作间隔 ≥1s）。
+- **trae-accounts**（Trae 账号池，对齐 trae2api 自带控制台）：
+  - 账号列表轮询：积分、启停/冷却/硬禁用/临过期/错误计数、token 到期天数；
+  - **面板内 OAuth 登录闭环**：「登录新账号」生成授权链接 → 用户点开登录 → 回调由网关 :18080
+    自动接收落盘 → 面板轮询结果，成功即入池（可取消）；
+  - 每号操作：启/停、改名、`刷新token`、`凭证`（脱敏 JSON 预览）、删除（确认）；
+  - 「积分/签到实查」上游实时额度 + 签到状态 + Work 积分；「导入凭证」粘贴回调链接或 JSON。
+  写操作由面板服务端代理注入 `TW2A_API_KEY`，key 不进浏览器。
 
 ## WorkBuddy 模型后端（可选）
 
