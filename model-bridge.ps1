@@ -44,7 +44,7 @@ param(
 
     [int]$Port = 8788,
     [int]$LogLines = 100,
-    [ValidateSet("mimo", "workbuddy")]
+    [ValidateSet("mimo", "workbuddy", "trae")]
     [string]$Upstream = "mimo",
     [string]$UpstreamUrl = "",
     [string]$UpstreamTokenFile = "",
@@ -108,6 +108,7 @@ function Show-Usage {
     Write-Host "  .\model-bridge.ps1 stop      停止 bridge"
     Write-Host "  .\model-bridge.ps1 configure-codex  可选：只写 Codex provider"
     Write-Host "  .\model-bridge.ps1 setup -Upstream workbuddy -UpstreamUrl http://127.0.0.1:7863 [-ChatMode raw|compatible]"
+    Write-Host "  .\model-bridge.ps1 setup -Upstream trae -UpstreamUrl http://127.0.0.1:7864"
     Write-Host "  双击「启动模型桥.bat」等价于 setup。模型继续由 cc-switch / 用户配置。"
 }
 
@@ -156,8 +157,8 @@ try {
             Write-Host "初始化本地 bridge 凭据（不会修改 Codex 模型配置）..." -ForegroundColor Cyan
             & node (Join-Path $dir "mint-token.mjs")
             if ($LASTEXITCODE -ne 0) { throw "mint-token 失败，ExitCode=$LASTEXITCODE" }
-            if ($Upstream -eq "workbuddy" -and $UpstreamTokenFile -and -not (Test-Path -LiteralPath $UpstreamTokenFile)) {
-                throw "找不到 WorkBuddy API key 文件：$UpstreamTokenFile"
+            if (($Upstream -eq "workbuddy" -or $Upstream -eq "trae") -and $UpstreamTokenFile -and -not (Test-Path -LiteralPath $UpstreamTokenFile)) {
+                throw "找不到上游 API key 文件：$UpstreamTokenFile"
             }
             Start-Bridge
             Start-Sleep -Milliseconds 300

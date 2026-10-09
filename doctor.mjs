@@ -32,7 +32,11 @@ const upstreamTokenFile = argOf(
     process.env.WORKBUDDY_API_KEY_FILE ||
     path.join(
       projectDir,
-      upstreamKind === "workbuddy" ? "workbuddy-api-key.txt" : "token.txt",
+      upstreamKind === "workbuddy"
+        ? "workbuddy-api-key.txt"
+        : upstreamKind === "trae"
+          ? "trae-api-key.txt"
+          : "token.txt",
     ),
 );
 const liveRequest = !hasFlag("--no-live-request");
@@ -162,9 +166,12 @@ if (status?.engine && upstreamToken) {
       ? result.payload.data.map((model) => String(model?.id || ""))
       : [];
     availableModels = models;
-    const expectedModel = upstreamKind === "workbuddy"
-      ? models.some((model) => model.includes(":"))
-      : models.some((model) => model.startsWith("mimo-desktop/"));
+    const expectedModel =
+      upstreamKind === "workbuddy"
+        ? models.some((model) => model.includes(":"))
+        : upstreamKind === "trae"
+          ? models.length > 0
+          : models.some((model) => model.startsWith("mimo-desktop/"));
     check(
       "mimo_engine_models",
       result.response.ok && expectedModel,
@@ -200,7 +207,7 @@ if (fs.existsSync(configPath)) {
     bridgeSecret && configuredSecret === bridgeSecret;
   check(
     "codex_config",
-    (provider === "mimo" || provider === "workbuddy") &&
+    (provider === "mimo" || provider === "workbuddy" || provider === "trae") &&
       baseUrl === `${bridgeBase}/v1` &&
       wireApi === "responses" &&
       secretMatches,
@@ -235,7 +242,9 @@ if (liveRequest && status?.ok && bridgeSecret) {
               ? availableModels.find((model) => model.includes(":")) ||
                 availableModels[0] ||
                 configModel
-              : configModel,
+              : upstreamKind === "trae"
+                ? availableModels[0] || configModel
+                : configModel,
           input: "Reply with OK only.",
           stream: false,
         }),

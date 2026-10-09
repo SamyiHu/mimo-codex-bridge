@@ -9,7 +9,9 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if /I "%~1"=="workbuddy" (
+if /I "%~1"=="trae" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0model-bridge.ps1" setup -Port 8788 -Upstream trae -UpstreamUrl http://127.0.0.1:7864 -ChatMode raw
+) else if /I "%~1"=="workbuddy" (
   if /I "%~2"=="raw" (
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0model-bridge.ps1" setup -Port 8788 -Upstream workbuddy -UpstreamUrl http://127.0.0.1:7863 -ChatMode raw
   ) else if /I "%~2"=="compatible" (

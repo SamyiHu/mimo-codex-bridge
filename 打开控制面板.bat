@@ -4,7 +4,7 @@ cd /d "%~dp0"
 
 where node >nul 2>&1
 if errorlevel 1 (
-  echo [ERROR] 需要 Node.js 18+
+  echo [ERROR] Need Node.js 18+
   pause
   exit /b 1
 )

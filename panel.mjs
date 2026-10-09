@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import os from "node:os";
+import { pathToFileURL } from "node:url";
 
 const DIR = import.meta.dirname;
 const PORT = Number(process.env.PANEL_PORT || 8791);
@@ -36,6 +37,11 @@ function loadSettings() {
       process.env.WORKBUDDY2API_DIR ||
       saved.gatewayDir ||
       path.join(os.homedir(), ".workbuddy2api"),
+    traeUrl: process.env.TRAE_URL || saved.traeUrl || "http://127.0.0.1:7864",
+    traeDir:
+      process.env.TRAE2API_DIR ||
+      saved.traeDir ||
+      path.join(os.homedir(), ".trae2api"),
   };
 }
 
@@ -44,20 +50,28 @@ function saveSettings(patch) {
   const next = {
     workbuddyUrl: String(patch.workbuddyUrl ?? current.workbuddyUrl).replace(/\/+$/, ""),
     gatewayDir: String(patch.gatewayDir ?? current.gatewayDir),
+    traeUrl: String(patch.traeUrl ?? current.traeUrl).replace(/\/+$/, ""),
+    traeDir: String(patch.traeDir ?? current.traeDir),
   };
   fs.writeFileSync(settingsFile, JSON.stringify(next, null, 2), "utf8");
   WORKBUDDY_URL = next.workbuddyUrl;
   GATEWAY_DIR = next.gatewayDir;
+  TRAE_URL = next.traeUrl;
+  TRAE_DIR = next.traeDir;
+  TRAE_EXE = path.join(TRAE_DIR, "trae2api.exe");
   GATEWAY_EXE = path.join(GATEWAY_DIR, "wb2api.exe");
   GATEWAY_CONFIG = path.join(GATEWAY_DIR, "config.json");
   GATEWAY_PID = path.join(GATEWAY_DIR, "wb2api.pid");
   return next;
 }
 
-let { workbuddyUrl: WORKBUDDY_URL, gatewayDir: GATEWAY_DIR } = loadSettings();
+let { workbuddyUrl: WORKBUDDY_URL, gatewayDir: GATEWAY_DIR, traeUrl: TRAE_URL, traeDir: TRAE_DIR } =
+  loadSettings();
 let GATEWAY_EXE = path.join(GATEWAY_DIR, "wb2api.exe");
 let GATEWAY_CONFIG = path.join(GATEWAY_DIR, "config.json");
 let GATEWAY_PID = path.join(GATEWAY_DIR, "wb2api.pid");
+let TRAE_EXE = path.join(TRAE_DIR, "trae2api.exe");
+const TRAE_KEY_FILE = path.join(DIR, "trae-api-key.txt");
 
 let actionLock = Promise.resolve();
 let lastAction = { label: "", state: "idle", detail: "", at: "" };
@@ -265,6 +279,53 @@ async function ensureGateway() {
   };
 }
 
+/** 确保 trae2api 在跑；不在就拉起（API key 走 TW2A_API_KEY 环境变量） */
+async function ensureTraeGateway() {
+  try {
+    const r = await fetchJson(`${TRAE_URL}/healthz`, {}, 1500);
+    if (r.ok) return { ok: true, started: false, detail: "已在运行" };
+  } catch {
+    /* not running */
+  }
+  if (!fs.existsSync(TRAE_EXE)) {
+    return { ok: false, started: false, detail: `找不到 ${TRAE_EXE}，请先部署 trae2api` };
+  }
+  const logDir = path.join(TRAE_DIR, "data");
+  if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+  const out = path.join(logDir, "server.out.log");
+  const err = path.join(logDir, "server.err.log");
+  const key = readText(TRAE_KEY_FILE);
+  const q = (p) => p.replace(/'/g, "''");
+  // 先把 key 写入注册表级环境（进程内 $env:）再 Start-Process，子进程继承
+  const start = await runCommand(
+    "powershell",
+    [
+      "-NoProfile",
+      "-Command",
+      (key ? `$env:TW2A_API_KEY = '${q(key)}'; ` : "") +
+        `$p = Start-Process -FilePath '${q(TRAE_EXE)}' ` +
+        `-ArgumentList '-config','config.json' ` +
+        `-WorkingDirectory '${q(TRAE_DIR)}' -WindowStyle Hidden ` +
+        `-RedirectStandardOutput '${q(out)}' -RedirectStandardError '${q(err)}' -PassThru; ` +
+        `[IO.File]::WriteAllText('${q(path.join(TRAE_DIR, "trae2api.pid"))}', [string]$p.Id); ` +
+        `Write-Output $p.Id`,
+    ],
+    { timeoutMs: 10000 },
+  );
+  for (let i = 0; i < 15; i++) {
+    await new Promise((r) => setTimeout(r, 400));
+    try {
+      const r = await fetchJson(`${TRAE_URL}/healthz`, {}, 1500);
+      if (r.ok) {
+        return { ok: true, started: true, detail: `已启动 PID ${(start.stdout || "").trim()}` };
+      }
+    } catch {
+      /* booting */
+    }
+  }
+  return { ok: false, started: true, detail: "已拉起但 healthz 未就绪，见 data/server.err.log" };
+}
+
 function setAction(label, state, detail) {
   const isRunning = state === "running";
   const prev = lastAction;
@@ -303,11 +364,14 @@ async function collectStatus() {
     time: new Date().toISOString(),
     bridgePort: BRIDGE_PORT,
     workbuddyUrl: WORKBUDDY_URL,
+    traeUrl: TRAE_URL,
     bridge: { online: false },
     workbuddy: { online: false },
+    trae: { online: false },
     keys: {
       bridgeSecret: Boolean(bridgeSecret),
       workbuddyKey: Boolean(workbuddyKey),
+      traeKey: Boolean(readText(TRAE_KEY_FILE)),
       mimoToken: Boolean(readText(tokenFile)),
     },
     codex: null,
@@ -380,6 +444,38 @@ async function collectStatus() {
     result.workbuddy.gateExe = fs.existsSync(GATEWAY_EXE);
   }
 
+  // trae2api（trae 上游网关）
+  const traeKey = readText(TRAE_KEY_FILE);
+  try {
+    const healthz = await fetchJson(`${TRAE_URL}/healthz`, {}, 2000);
+    result.trae.online = Boolean(healthz.ok);
+    result.trae.detail = String(healthz.status ?? "");
+    result.trae.gateDir = TRAE_DIR;
+    result.trae.gateExe = fs.existsSync(TRAE_EXE);
+    if (traeKey) {
+      try {
+        const models = await fetchJson(
+          `${TRAE_URL}/v1/models`,
+          { headers: { Authorization: `Bearer ${traeKey}` } },
+          3000,
+        );
+        if (models.ok && Array.isArray(models.payload?.data)) {
+          result.trae.modelCount = models.payload.data.length;
+          result.trae.sample = models.payload.data
+            .slice(0, 6)
+            .map((m) => m.id)
+            .filter(Boolean);
+        }
+      } catch {
+        /* optional */
+      }
+    }
+  } catch {
+    result.trae.detail = "未运行或不可达（需先启动 trae2api）";
+    result.trae.gateDir = TRAE_DIR;
+    result.trae.gateExe = fs.existsSync(TRAE_EXE);
+  }
+
   try {
     const configPath = path.join(os.homedir(), ".codex", "config.toml");
     if (fs.existsSync(configPath)) {
@@ -416,10 +512,10 @@ function withLock(fn) {
 async function switchUpstream(upstream, chatMode) {
   return withLock(async () => {
     setAction(`切换到 ${upstream}`, "running", "正在停止旧 bridge…");
-    // 切 workbuddy 前确保网关在跑，避免 bridge 起来后上游离线
-    if (upstream === "workbuddy") {
-      setAction(`切换到 ${upstream}`, "running", "正在启动 workbuddy2api 网关…");
-      const gw = await ensureGateway();
+    // 切网关型上游前先确保网关在跑，避免 bridge 起来后上游离线
+    if (upstream === "workbuddy" || upstream === "trae") {
+      setAction(`切换到 ${upstream}`, "running", `正在启动 ${upstream} 网关…`);
+      const gw = upstream === "trae" ? await ensureTraeGateway() : await ensureGateway();
       if (!gw.ok) {
         setAction(`切换到 ${upstream}`, "fail", `网关未就绪：${gw.detail}`);
         return {
@@ -438,6 +534,9 @@ async function switchUpstream(upstream, chatMode) {
     if (upstream === "workbuddy") {
       args.push("-UpstreamUrl", WORKBUDDY_URL);
       if (chatMode) args.push("-ChatMode", chatMode);
+    } else if (upstream === "trae") {
+      args.push("-UpstreamUrl", TRAE_URL);
+      args.push("-ChatMode", "raw");
     } else if (chatMode) {
       args.push("-ChatMode", chatMode);
     }
@@ -484,6 +583,9 @@ async function bridgeAction(action) {
       if (upstream === "workbuddy") {
         args.push("-UpstreamUrl", WORKBUDDY_URL);
         args.push("-ChatMode", "raw");
+      } else if (upstream === "trae") {
+        args.push("-UpstreamUrl", TRAE_URL);
+        args.push("-ChatMode", "raw");
       }
       const start = await runPowerShell(path.join(DIR, "start-bridge.ps1"), args);
       result.start = start;
@@ -496,7 +598,8 @@ async function bridgeAction(action) {
   });
 }
 
-const HTML = `<!doctype html>
+function buildHtml(pluginCards) {
+  return `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
@@ -580,7 +683,7 @@ const HTML = `<!doctype html>
   /* 上游切换：两个大块，整块可点 */
   .switches {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 1fr 1fr;
     gap: 12px;
   }
   @media (max-width: 640px) {
@@ -807,6 +910,12 @@ const HTML = `<!doctype html>
             <div class="badge" id="badge-workbuddy"><span class="dot"></span>未选中</div>
             <div class="cta" id="cta-workbuddy">点击切换 →</div>
           </button>
+          <button class="switch" type="button" id="sw-trae" data-upstream="trae">
+            <div class="title">Trae（SOLO）</div>
+            <div class="desc">走 trae2api (:7864)。GLM / Doubao / DeepSeek 等，模型 ID 原样透传。</div>
+            <div class="badge" id="badge-trae"><span class="dot"></span>未选中</div>
+            <div class="cta" id="cta-trae">点击切换 →</div>
+          </button>
         </div>
 
         <div class="actions">
@@ -837,6 +946,14 @@ const HTML = `<!doctype html>
             <span>API Key</span>
             <input id="cfgKey" type="password" spellcheck="false" placeholder="workbuddy2api 的 api_key" />
           </label>
+          <label>
+            <span>Trae 网关地址</span>
+            <input id="cfgTraeUrl" type="text" spellcheck="false" placeholder="http://127.0.0.1:7864" />
+          </label>
+          <label>
+            <span>Trae 网关目录</span>
+            <input id="cfgTraeDir" type="text" spellcheck="false" placeholder="C:\Users\你\.trae2api" />
+          </label>
           <div class="form-actions">
             <button class="btn primary" type="button" id="saveCfgBtn"><span class="btn-label">保存配置</span></button>
             <button class="btn" type="button" id="reloadCfgBtn"><span class="btn-label">重新加载</span></button>
@@ -849,6 +966,7 @@ const HTML = `<!doctype html>
         <h2>可用模型</h2>
         <div class="models" id="modelsBody"><div class="empty">—</div></div>
       </section>
+${pluginCards}
     </div>
 
     <footer>
@@ -878,12 +996,12 @@ const HTML = `<!doctype html>
     function setBusy(on, action) {
       busy = on;
       activeAction = on ? action : null;
-      for (const id of ["refreshBtn", "startBtn", "restartBtn", "stopBtn", "sw-mimo", "sw-workbuddy", "gatewayBtn", "saveCfgBtn", "reloadCfgBtn"]) {
+      for (const id of ["refreshBtn", "startBtn", "restartBtn", "stopBtn", "sw-mimo", "sw-workbuddy", "sw-trae", "gatewayBtn", "saveCfgBtn", "reloadCfgBtn"]) {
         const el = $(id);
         if (el) el.disabled = on;
       }
       // 只改卡片 CTA / 按钮 label，绝不动整块 DOM
-      for (const id of ["mimo", "workbuddy"]) {
+      for (const id of ["mimo", "workbuddy", "trae"]) {
         const cta = $("cta-" + id);
         if (!cta) continue;
         if (on && action && action.kind === "switch" && action.target === id) {
@@ -937,6 +1055,7 @@ const HTML = `<!doctype html>
     function renderStatus(data) {
       const b = data.bridge || {};
       const w = data.workbuddy || {};
+      const t = data.trae || {};
       const k = data.keys || {};
       const c = data.codex || {};
 
@@ -960,8 +1079,12 @@ const HTML = `<!doctype html>
         ["WorkBuddy2API", w.online
           ? '<span class="dot ok"></span>在线' + (w.modelCount != null ? " · " + w.modelCount + " 个模型" : "")
           : '<span class="dot err"></span>离线 · ' + (w.detail || "未运行或不可达")],
+        ["Trae2API", t.online
+          ? '<span class="dot ok"></span>在线' + (t.modelCount != null ? " · " + t.modelCount + " 个模型" : "")
+          : '<span class="dot err"></span>离线 · ' + (t.detail || "未运行或不可达")],
         ["bridge-secret", k.bridgeSecret ? '<span class="dot ok"></span>已配置' : '<span class="dot err"></span>缺失'],
         ["WorkBuddy key", k.workbuddyKey ? '<span class="dot ok"></span>已配置' : '<span class="dot warn"></span>缺失'],
+        ["Trae key", k.traeKey ? '<span class="dot ok"></span>已配置' : '<span class="dot warn"></span>缺失'],
         ["Codex provider", (c.provider || "—") + (c.pointsToBridge ? ' <span class="badge on">已指向 bridge</span>' : "")],
         ["Codex base_url", c.baseUrl || (c.missing ? "未找到 config.toml" : "—")],
       ];
@@ -973,7 +1096,7 @@ const HTML = `<!doctype html>
       );
 
       const active = b.upstreamKind || "";
-      for (const id of ["mimo", "workbuddy"]) {
+      for (const id of ["mimo", "workbuddy", "trae"]) {
         const btn = $("sw-" + id);
         const badge = $("badge-" + id);
         const cta = $("cta-" + id);
@@ -990,7 +1113,7 @@ const HTML = `<!doctype html>
         // busy 时保留“处理中…”，空闲才显示切换/生效文案
         const serverRunning = Boolean(data.actionBusy) || data.lastAction?.state === "running";
         const serverSwitchTarget =
-          /切换到 (mimo|workbuddy)/.exec(data.lastAction?.label || "")?.[1] || null;
+          /切换到 (mimo|workbuddy|trae)/.exec(data.lastAction?.label || "")?.[1] || null;
         if (!busy && !serverRunning) {
           cta.classList.remove("busy-text");
           setText(cta, on ? "当前生效中 ✓" : "点击切换 →");
@@ -1117,6 +1240,8 @@ const HTML = `<!doctype html>
         $("cfgUrl").value = data.workbuddyUrl || "";
         $("cfgDir").value = data.gatewayDir || "";
         $("cfgKey").value = data.apiKey || "";
+        $("cfgTraeUrl").value = data.traeUrl || "";
+        $("cfgTraeDir").value = data.traeDir || "";
         const bits = [];
         bits.push(data.gatewayExeExists ? "网关可执行文件：已找到" : "网关可执行文件：缺失");
         bits.push(data.apiKeySet ? "API Key：已配置" : "API Key：未配置");
@@ -1124,6 +1249,7 @@ const HTML = `<!doctype html>
           bits.push(data.gatewayApiKeyMatch ? "与网关 config.json 一致" : "与网关 config.json 不一致");
         }
         bits.push(data.bridgeSecretSet ? "bridge-secret：已配置" : "bridge-secret：缺失");
+        bits.push("trae2api：" + (data.traeDir || "默认 ~/.trae2api"));
         $("cfgMeta").textContent = bits.join(" · ");
       } catch (e) {
         $("cfgMeta").textContent = "读取配置失败：" + e;
@@ -1141,6 +1267,8 @@ const HTML = `<!doctype html>
             workbuddyUrl: $("cfgUrl").value.trim(),
             gatewayDir: $("cfgDir").value.trim(),
             apiKey: $("cfgKey").value.trim(),
+            traeUrl: $("cfgTraeUrl").value.trim(),
+            traeDir: $("cfgTraeDir").value.trim(),
           }),
         });
         const data = await res.json();
@@ -1160,6 +1288,7 @@ const HTML = `<!doctype html>
 
     $("sw-mimo").addEventListener("click", () => doSwitch("mimo"));
     $("sw-workbuddy").addEventListener("click", () => doSwitch("workbuddy"));
+    $("sw-trae").addEventListener("click", () => doSwitch("trae"));
     $("startBtn").addEventListener("click", () => doBridge("start"));
     $("stopBtn").addEventListener("click", () => doBridge("stop"));
     $("restartBtn").addEventListener("click", () => doBridge("restart"));
@@ -1175,6 +1304,66 @@ const HTML = `<!doctype html>
 </body>
 </html>
 `;
+}
+
+let HTML = "";
+
+// ── 插件系统：panel-plugins/*.mjs 可注册页面卡片与 /api/plugins/<id>/* 路由 ──
+const pluginRoutes = [];
+const pluginCards = [];
+
+function registerPluginRoute(pluginId, method, subPath, handler) {
+  const routePath = `/api/plugins/${pluginId}${subPath}`;
+  pluginRoutes.push({ method, path: routePath, handler });
+}
+
+async function loadPlugins() {
+  const dir = path.join(DIR, "panel-plugins");
+  if (!fs.existsSync(dir)) return;
+  for (const file of fs.readdirSync(dir).filter((f) => f.endsWith(".mjs")).sort()) {
+    try {
+      const mod = await import(pathToFileURL(path.join(dir, file)).href);
+      const plugin = mod.default ?? mod;
+      if (!plugin?.id || typeof plugin.init !== "function") {
+        console.error(`[panel] 插件 ${file} 缺少 id 或 init()，已跳过`);
+        continue;
+      }
+      await plugin.init({
+        registerRoute: (method, subPath, handler) =>
+          registerPluginRoute(plugin.id, method, subPath, handler),
+        registerCard: (html) => pluginCards.push(html),
+        // 运行期可变的面板设置（保存配置后 gatewayDir 等会更新）
+        settings: () => ({
+          workbuddyUrl: WORKBUDDY_URL,
+          gatewayDir: GATEWAY_DIR,
+          gatewayExe: GATEWAY_EXE,
+          gatewayConfig: GATEWAY_CONFIG,
+          traeUrl: TRAE_URL,
+          traeDir: TRAE_DIR,
+          traeExe: TRAE_EXE,
+          bridgePort: BRIDGE_PORT,
+        }),
+        readText,
+        runCommand,
+        fetchJson,
+        DIR,
+      });
+      console.log(`[panel] 已加载插件 ${plugin.id}（${file}）`);
+    } catch (error) {
+      console.error(`[panel] 插件 ${file} 加载失败：${error?.stack || error}`);
+    }
+  }
+}
+
+async function readBody(req) {
+  let body = "";
+  for await (const chunk of req) body += chunk;
+  try {
+    return JSON.parse(body || "{}");
+  } catch {
+    return {};
+  }
+}
 
 function json(res, code, payload) {
   res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
@@ -1185,6 +1374,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://127.0.0.1:${PORT}`);
 
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
+    await htmlReady;
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(HTML);
     return;
@@ -1215,6 +1405,8 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         workbuddyUrl: settings.workbuddyUrl,
         gatewayDir: settings.gatewayDir,
+        traeUrl: settings.traeUrl,
+        traeDir: settings.traeDir,
         gatewayExe: GATEWAY_EXE,
         gatewayConfig: GATEWAY_CONFIG,
         gatewayExeExists: fs.existsSync(GATEWAY_EXE),
@@ -1243,6 +1435,8 @@ const server = http.createServer(async (req, res) => {
       const patch = {};
       if (payload.workbuddyUrl != null) patch.workbuddyUrl = String(payload.workbuddyUrl).trim();
       if (payload.gatewayDir != null) patch.gatewayDir = String(payload.gatewayDir).trim();
+      if (payload.traeUrl != null) patch.traeUrl = String(payload.traeUrl).trim();
+      if (payload.traeDir != null) patch.traeDir = String(payload.traeDir).trim();
       const saved = saveSettings(patch);
       if (payload.apiKey != null) {
         const key = String(payload.apiKey).trim();
@@ -1269,6 +1463,8 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         workbuddyUrl: saved.workbuddyUrl,
         gatewayDir: saved.gatewayDir,
+        traeUrl: saved.traeUrl,
+        traeDir: saved.traeDir,
       });
     } catch (error) {
       setAction("保存 WorkBuddy 配置", "fail", String(error));
@@ -1286,15 +1482,15 @@ const server = http.createServer(async (req, res) => {
       /* ignore */
     }
     const upstream = String(payload.upstream || "").toLowerCase();
-    if (upstream !== "mimo" && upstream !== "workbuddy") {
+    if (upstream !== "mimo" && upstream !== "workbuddy" && upstream !== "trae") {
       res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: false, error: "upstream 必须是 mimo 或 workbuddy" }));
+      res.end(JSON.stringify({ ok: false, error: "upstream 必须是 mimo / workbuddy / trae" }));
       return;
     }
     const chatMode =
       payload.chatMode === "raw" || payload.chatMode === "compatible"
         ? payload.chatMode
-        : upstream === "workbuddy"
+        : upstream === "workbuddy" || upstream === "trae"
           ? "raw"
           : "compatible";
     // 异步执行：立刻返回，前端靠 /api/status 轮询完成态
@@ -1346,6 +1542,16 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  for (const route of pluginRoutes) {
+    if (req.method === route.method && url.pathname === route.path) {
+      try {
+        return await route.handler(req, res, { url, json, readBody });
+      } catch (error) {
+        return json(res, 500, { ok: false, error: String(error) });
+      }
+    }
+  }
+
   res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify({ ok: false, error: "not found" }));
 });
@@ -1374,3 +1580,12 @@ server.listen(PORT, "127.0.0.1", () => {
       console.log(`[panel] workbuddy2api 启动检查失败：${error}`);
     });
 });
+
+// 插件先加载完再渲染页面，保证插件卡片出现在首屏 HTML 里
+const htmlReady = loadPlugins()
+  .catch((error) => {
+    console.error(`[panel] 插件加载异常：${error?.stack || error}`);
+  })
+  .finally(() => {
+    HTML = buildHtml(pluginCards.join("\n"));
+  });

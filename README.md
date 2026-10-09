@@ -192,15 +192,40 @@ node panel.mjs
 ```
 
 面板只监听 `127.0.0.1`，功能：
-- **状态**：bridge / workbuddy2api 是否在线、当前上游、Codex provider 是否指向 bridge、key 是否齐全
-- **切换**：点卡片在 MiMo / WorkBuddy 之间切换（会自动重启 bridge）
+- **状态**：bridge / workbuddy2api / trae2api 是否在线、当前上游、Codex provider 是否指向 bridge、key 是否齐全
+- **切换**：点卡片在 MiMo / WorkBuddy / Trae 之间切换（会自动重启 bridge；网关型上游会先拉起网关）
 - **启停**：启动 / 重启 / 停止 bridge
 - **网关**：一键拉起 workbuddy2api（`~/.workbuddy2api/wb2api.exe`）；面板启动、切到 WorkBuddy 时也会自动拉起
 - **模型**：列出当前 bridge 可用模型 ID
+- **插件**：`panel-plugins/*.mjs` 自动加载，可给面板加卡片和 `/api/plugins/<id>/*` 接口（见下）
 
 端口被占用时：`PANEL_PORT=8792 node panel.mjs`。
 
 WorkBuddy2API 部署目录默认 `C:\Users\<你>\.workbuddy2api`，可用 `WORKBUDDY2API_DIR` 覆盖。`start-bridge.ps1 -Upstream workbuddy` 也会尝试自动拉起网关。
+
+### 面板插件
+
+把一个 `panel-plugins/<name>.mjs` 放进项目即可扩展面板，无需改 panel.mjs：
+
+```js
+// panel-plugins/my-plugin.mjs
+export default {
+  id: "my-plugin",           // 路由前缀 /api/plugins/my-plugin
+  init(ctx) {
+    ctx.registerCard(`<section class="card">…卡片 HTML（可带内联 <script>）…</section>`);
+    ctx.registerRoute("GET", "/data", async (req, res, { json, url, readBody }) => {
+      json(res, 200, { ok: true });
+    });
+  },
+};
+```
+
+`ctx` 还提供：`settings()`（实时读取 workbuddyUrl / gatewayDir 等）、`runCommand(exe, args, opts)`（带超时的子进程）、`fetchJson`、`readText`、`DIR`。插件加载失败只打日志，不影响面板本体。
+
+内置插件：
+
+- **workbuddy-credits**（WorkBuddy 积分）：卡片实时轮询网关 `/status` 的账号池（每 15s，本地调用）；「刷新积分日报」调网关目录的 `credit.exe -json` 实查上游余额（会打上游接口，故手动触发）；「立即签到」调 `signin_bin.exe auths`（幂等，网关本身 09/21 点也有定时签到，这里是对账/补签入口）。
+- **workbuddy-tasks**（WorkBuddy 自动任务）：总览六类定时积分任务（签到/猫猫旅行/活跃地图/保活/开学季/夜猫子）的开关、执行时刻与下次运行估算；点 `[切换]` 改写网关 `config.json` 的 `schedule.*_enabled`，「重启网关（应用开关）」负责生效（kill + 拉起 wb2api.exe 并等 healthz）；「查询成长任务 (dry-run)」和「完成+领奖 (--yes)」直接驱动网关的 `scripts/task_runner.py`（成长任务一体机，--yes 有确认弹窗，动作间隔 ≥1s）。
 
 ## WorkBuddy 模型后端（可选）
 
@@ -224,6 +249,33 @@ copilot.tencent.com
 管理面板。它发布包内的 `upstream/` 目录就是 MIT 许可的 `workbuddy2api` 源码；上游原始
 仓库已删除，因此新部署应使用该发布包中的源码。bridge 不复制账号池，只把它的
 OpenAI-compatible Chat API 作为可选 upstream。
+
+## Trae（SOLO）模型后端（可选）
+
+[trae2api](https://github.com/JeffHu0912/trae2api) 把 **TRAE SOLO 对话通道**反代成
+OpenAI 兼容 API（GLM / Doubao / DeepSeek 等，默认端口 7864）。bridge 把它作为与
+workbuddy 同级的第三上游 `trae`：模型 ID 原样透传、chat mode 固定 raw、凭据走
+`trae-api-key.txt`（内容 = 启动网关的 `TW2A_API_KEY`）。
+
+部署（需要 Go，或自行编译）：
+
+```powershell
+git clone --depth 1 https://github.com/JeffHu0912/trae2api.git $env:USERPROFILE\.trae2api
+cd $env:USERPROFILE\.trae2api
+go build -trimpath -ldflags="-s -w" -o trae2api.exe ./cmd/server
+copy config.example.json config.json
+# 生成 API key 写到 bridge 目录的 trae-api-key.txt，启动时以 TW2A_API_KEY 注入
+$env:TW2A_API_KEY = "<key>"; .\trae2api.exe -config config.json
+```
+
+账号：打开 `http://127.0.0.1:7864/admin` 用 TRAE 账号登录（OAuth 回调自动换 token），
+或参考仓库 `login.sh`。没有账号时网关能起、`/v1/models` 正常，但对话会报
+`all accounts unavailable`。
+
+切换：控制面板点第三张「Trae（SOLO）」卡片，或
+`.\启动模型桥.bat trae` / `.\model-bridge.ps1 setup -Upstream trae -UpstreamUrl http://127.0.0.1:7864`。
+`start-bridge.ps1 -Upstream trae` 会自动拉起网关（读 `TRAE2API_DIR`，默认 `~/.trae2api`，
+key 自动取 `trae-api-key.txt`）。
 
 ### 启动 WorkBuddy upstream
 

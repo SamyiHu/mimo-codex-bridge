@@ -66,11 +66,18 @@ const UPSTREAM_KIND = (
   argOf("--upstream-kind", process.env.MIMO_BRIDGE_UPSTREAM_KIND || "mimo") ||
   "mimo"
 ).toLowerCase();
+// OpenAI 直通型上游（本地网关反代，模型 ID 原样透传）：
+// workbuddy = workbuddy2api (:7863)，trae = trae2api (:7864)。
+const OPENAI_UPSTREAM_DEFAULTS = {
+  workbuddy: { tokenFile: "workbuddy-api-key.txt", engineUrl: "http://127.0.0.1:7863" },
+  trae: { tokenFile: "trae-api-key.txt", engineUrl: "http://127.0.0.1:7864" },
+};
+const PASSTHROUGH_UPSTREAM = Boolean(OPENAI_UPSTREAM_DEFAULTS[UPSTREAM_KIND]);
 const CHAT_MODE = (
   argOf(
     "--chat-mode",
     process.env.MIMO_BRIDGE_CHAT_MODE ||
-      (UPSTREAM_KIND === "workbuddy" ? "raw" : "compatible"),
+      (PASSTHROUGH_UPSTREAM ? "raw" : "compatible"),
   ) || "compatible"
 ).toLowerCase();
 const RAW_CHAT = CHAT_MODE === "raw";
@@ -80,7 +87,9 @@ const TOKEN_FILE = argOf(
     process.env.WORKBUDDY_API_KEY_FILE ||
     path.join(
       import.meta.dirname,
-      UPSTREAM_KIND === "workbuddy" ? "workbuddy-api-key.txt" : "token.txt",
+      PASSTHROUGH_UPSTREAM
+        ? OPENAI_UPSTREAM_DEFAULTS[UPSTREAM_KIND].tokenFile
+        : "token.txt",
     ),
 );
 const BRIDGE_SECRET_FILE = argOf(
@@ -96,14 +105,12 @@ const PROCESS_NAME = argOf(
 const MODEL_PREFIX = argOf(
   "--model-prefix",
   process.env.MIMO_BRIDGE_MODEL_PREFIX ||
-    (UPSTREAM_KIND === "workbuddy" ? "off" : "mimo-desktop"),
+    (PASSTHROUGH_UPSTREAM ? "off" : "mimo-desktop"),
 );
 const MODEL_FALLBACK = argOf(
   "--model-fallback",
   process.env.MIMO_BRIDGE_MODEL_FALLBACK ||
-    (UPSTREAM_KIND === "workbuddy"
-      ? "off"
-      : "mimo-desktop/mimo-v2.6-pro"),
+    (PASSTHROUGH_UPSTREAM ? "off" : "mimo-desktop/mimo-v2.6-pro"),
 );
 // 上游不返回 usage 时是否用本地估算器补齐（MIMO_BRIDGE_TOKEN_ESTIMATE=off 关闭）。
 const TOKEN_ESTIMATE_ENABLED = !/^(0|off|false)$/i.test(
@@ -114,7 +121,7 @@ const ENGINE_URL = (
   argOf(
     "--engine-url",
     process.env.MIMO_BRIDGE_ENGINE_URL ||
-      (UPSTREAM_KIND === "workbuddy" ? "http://127.0.0.1:7863" : ""),
+      (PASSTHROUGH_UPSTREAM ? OPENAI_UPSTREAM_DEFAULTS[UPSTREAM_KIND].engineUrl : ""),
   ) || ""
 )
   .trim()
@@ -217,8 +224,8 @@ function loadToken() {
     return fs.readFileSync(TOKEN_FILE, "utf8").trim();
   }
   const nextStep =
-    UPSTREAM_KIND === "workbuddy"
-      ? "write the workbuddy2api API key to " + TOKEN_FILE
+    PASSTHROUGH_UPSTREAM
+      ? "write the " + UPSTREAM_KIND + " API key to " + TOKEN_FILE
       : "run node mint-token.mjs";
   console.error(
     "[bridge] missing upstream credential file: " +
@@ -674,12 +681,14 @@ function pickFallbackModel(known) {
     if (
       !/asr|tts/i.test(id) &&
       (id.startsWith("mimo-desktop/") ||
-        (UPSTREAM_KIND === "workbuddy" && id.includes(":")))
+        // workbuddy 模型带 cn:/global: 域前缀，trae 模型是裸 ID（glm-5.2 等）
+        (PASSTHROUGH_UPSTREAM &&
+          (UPSTREAM_KIND !== "workbuddy" || id.includes(":"))))
     ) {
       return id;
     }
   }
-  if (UPSTREAM_KIND === "workbuddy") {
+  if (PASSTHROUGH_UPSTREAM) {
     for (const id of known) {
       if (!/asr|tts/i.test(id)) return id;
     }
@@ -1801,8 +1810,8 @@ async function handleApiRequest(req, res, metricState = null) {
       return sendError(
         res,
         503,
-          UPSTREAM_KIND === "workbuddy"
-            ? "workbuddy2api not found; start it on the configured upstream URL"
+          PASSTHROUGH_UPSTREAM
+            ? `${UPSTREAM_KIND} gateway not found; start it on the configured upstream URL`
             : "MiMo Desktop engine not found; start the desktop app and rerun mint-token.mjs",
         requestId,
       );
@@ -2239,8 +2248,8 @@ async function runBackgroundResponse(body, chatBody, requestId) {
     if (!base) {
       throw Object.assign(
         new Error(
-          UPSTREAM_KIND === "workbuddy"
-            ? "workbuddy2api not found"
+          PASSTHROUGH_UPSTREAM
+            ? `${UPSTREAM_KIND} gateway not found`
             : "MiMo Desktop engine not found",
         ),
         { statusCode: 503 },
@@ -2393,8 +2402,8 @@ server.listen(LISTEN_PORT, "127.0.0.1", async () => {
   console.log(
     base
       ? "[bridge] ready (streaming + authenticated)"
-      : UPSTREAM_KIND === "workbuddy"
-        ? "[bridge] warning: workbuddy2api not found; /health will retry"
+      : PASSTHROUGH_UPSTREAM
+        ? `[bridge] warning: ${UPSTREAM_KIND} gateway not found; /health will retry`
         : "[bridge] warning: MiMo engine not found; /health will retry",
   );
 });
