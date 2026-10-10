@@ -9,6 +9,7 @@
  *   - 凭证 JSON 脱敏预览（/admin/api/accounts/{uid}/json）
  *   - 软启停 / 改昵称 / 删除 / 手动刷新 token
  *   - 积分/签到实查（上游实时额度 + 签到状态 + Work 积分）
+ *   - 手动签到（单号，上游 status → claim → 解冻冷却账号）
  *   - 凭证导入：粘贴登录回调链接或 JSON
  * 写操作经面板服务端代理注入 TW2A_API_KEY，key 不进浏览器。
  */
@@ -108,6 +109,18 @@ export default {
           "{}",
           30000,
         );
+        return json(res, 200, { ok: r.ok, status: r.status, payload: r.payload });
+      } catch (error) {
+        return json(res, 200, { ok: false, error: String(error).slice(0, 160) });
+      }
+    });
+
+    // 手动签到：uid 缺省时遍历全部未禁用账号（上游语义：status → 未签则 claim → 解冻）
+    registerRoute("POST", "/checkin", async (req, res, { json, readBody }) => {
+      const body = await readBody(req);
+      const uid = String(body.uid || "").trim();
+      try {
+        const r = await proxy("POST", "/admin/api/checkin", uid ? JSON.stringify({ uid }) : "{}", 60000);
         return json(res, 200, { ok: r.ok, status: r.status, payload: r.payload });
       } catch (error) {
         return json(res, 200, { ok: false, error: String(error).slice(0, 160) });
@@ -284,6 +297,7 @@ export default {
             var acts =
               act(a.enabled ? "停用" : "启用", "toggle:" + a.uid) +
               act("改名", "rename:" + a.uid) +
+              act("签到", "checkin:" + a.uid) +
               act("刷新token", "refresh:" + a.uid) +
               act("凭证", "cred:" + a.uid) +
               act("删除", "delete:" + a.uid);
@@ -336,6 +350,23 @@ export default {
               });
               var d3 = await r3.json();
               if (!d3.ok) alert("刷新失败：" + JSON.stringify(d3.payload || d3.error));
+            } else if (kind === "checkin") {
+              ev.target.textContent = "签到中…";
+              var r6 = await fetch(BASE + "/checkin", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ uid: uid }),
+              });
+              var d6 = await r6.json();
+              var p6 = (d6.payload && d6.payload.results && d6.payload.results[0]) || {};
+              if (!d6.ok || p6.error) {
+                alert("签到失败：" + (p6.error || JSON.stringify(d6.payload || d6.error)));
+              } else {
+                var now6 = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+                showOut("[" + now6 + "]\\n" + (p6.nickname || uid) + "：" +
+                  (p6.already_checked_in ? "今日已签过，无需重复签到" : "签到成功 ✅") +
+                  " · 当前积分 " + p6.remain);
+                doCredits(true); // 静默刷新实查缓存，账号行同步为新积分
+              }
             } else if (kind === "cred") {
               var r5 = await fetch(BASE + "/account-json?uid=" + encodeURIComponent(uid), { cache: "no-store" });
               var d5 = await r5.json();
