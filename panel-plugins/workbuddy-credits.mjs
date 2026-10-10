@@ -4,6 +4,7 @@
  *
  * 数据与动作全部来自 workbuddy2api（网关目录）：
  *   - 池状态：GET <网关>/status（本地网关，随页面轮询）— 账号、冷却、启停、限流、成本台账
+ *   - 模型倍率：/v1/models 官方倍率全目录（对齐官方 UI）+ /v1/stats 实测单价（累计积分÷token）
  *   - 用量统计：GET <网关>/v1/stats — 请求/成功率/token/缓存命中（随页面轮询）
  *   - 积分日报：credit.exe -json（实查上游余额，手动触发）
  *   - 手动签到：signin_bin.exe auths（幂等；网关 09/21 点定时签到之外的对账/补签）
@@ -84,6 +85,24 @@ export default {
         return json(res, 200, { ok: true, stats: r.payload });
       } catch (error) {
         return json(res, 200, { ok: false, error: "统计不可达" });
+      }
+    });
+
+    // 模型目录（/v1/models，含官方积分倍率 credits 原文，如 "x0.21"）
+    registerRoute("GET", "/models", async (req, res, { json }) => {
+      const s = settings();
+      const key = readApiKey(s.gatewayConfig);
+      if (!key) return json(res, 200, { ok: false, error: "网关配置缺 api_key" });
+      try {
+        const r = await fetchJson(
+          `${s.workbuddyUrl}/v1/models`,
+          { headers: { Authorization: `Bearer ${key}` } },
+          5000,
+        );
+        if (!r.ok) return json(res, 200, { ok: false, error: `/v1/models HTTP ${r.status}` });
+        return json(res, 200, { ok: true, models: Array.isArray(r.payload?.data) ? r.payload.data : [] });
+      } catch (error) {
+        return json(res, 200, { ok: false, error: "模型目录不可达" });
       }
     });
 
@@ -337,6 +356,7 @@ export default {
         <h2>WorkBuddy 积分（插件）</h2>
         <div class="rows" id="wbc-pool"><div class="empty">加载中…</div></div>
         <div class="rows" id="wbc-stats"><div class="empty">统计加载中…</div></div>
+        <div class="rows" id="wbc-rates"><div class="empty">模型倍率加载中…</div></div>
         <div class="actions">
           <button class="btn primary" type="button" id="wbc-login"><span class="btn-label">登录新账号</span></button>
           <button class="btn" type="button" id="wbc-report"><span class="btn-label">刷新积分日报</span></button>
@@ -359,6 +379,38 @@ export default {
           <div class="empty">积分日报未拉取。点「刷新积分日报」会实查上游余额（走 workbuddy2api 的 credit 工具）。</div>
         </div>
         <style>
+          #wbc-rates {
+            max-height: 400px; overflow: auto;
+            scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+          }
+          #wbc-rates::-webkit-scrollbar { width: 6px; }
+          #wbc-rates::-webkit-scrollbar-track { background: transparent; }
+          #wbc-rates::-webkit-scrollbar-button { display: none; }
+          #wbc-rates::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+          #wbc-rates::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+          #wbc-rates .wrc-hint { color: var(--muted); font-size: 11px; margin: 2px 0 8px; }
+          #wbc-rates .wrc-sub { color: var(--muted); font-size: 11px; margin: 12px 0 6px; }
+          #wbc-rates table.wrc-table {
+            width: 100%; border-collapse: collapse;
+            font: 12px/1.6 ui-monospace, Consolas, monospace;
+          }
+          #wbc-rates .wrc-table th {
+            position: sticky; top: 0; background: var(--panel);
+            color: var(--muted); font-weight: normal; font-size: 11px;
+            text-align: right; padding: 3px 10px 4px 8px; border-bottom: 1px solid var(--line);
+          }
+          #wbc-rates .wrc-table td {
+            text-align: right; padding: 3px 10px 3px 8px;
+            border-bottom: 1px solid var(--line); color: var(--ink);
+          }
+          #wbc-rates .wrc-table th:first-child, #wbc-rates .wrc-table td:first-child { text-align: left; }
+          #wbc-rates .wrc-table td.num { font-variant-numeric: tabular-nums; }
+          #wbc-rates .wrc-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+          #wbc-rates .wrc-chip {
+            border: 1px solid var(--line); border-radius: 10px; padding: 1px 9px;
+            font: 11px/1.7 ui-monospace, Consolas, monospace; color: var(--muted);
+          }
+          #wbc-rates .wrc-chip b { color: var(--ink); font-weight: normal; }
           #wbc-checkin-out {
             display: none; margin: 8px 0 0; padding: 10px 12px;
             background: var(--panel-2); border: 1px solid var(--line);
@@ -457,6 +509,74 @@ export default {
           for (var i = 0; i < nodes.length; i++) nodes[i].addEventListener("click", onAct);
         }
 
+        // 模型倍率：官方倍率（/v1/models 目录，对齐官方 UI）+ 实测单价（/v1/stats 累计积分÷token）
+        // 在用模型走六列表格，未使用的收进底部标签云
+        function renderRates(statsData, modelsData) {
+          var el = byId("wbc-rates");
+          if (!el) return;
+          var statsRows = (statsData && statsData.ok && statsData.stats && statsData.stats.models) || [];
+          var used = {}; // 裸模型名 -> {credit, tokens, requests}
+          statsRows.forEach(function (m) {
+            if (Number(m.total_tokens) > 0) {
+              used[String(m.model || "").replace(/^(cn|global):/, "")] = {
+                credit: Number(m.credit || 0),
+                tokens: Number(m.total_tokens || 0),
+                requests: Number(m.requests || 0),
+              };
+            }
+          });
+          var catalog = (modelsData && modelsData.ok && Array.isArray(modelsData.models)) ? modelsData.models : [];
+          var bare = function (id) { return String(id || "").replace(/^(cn|global):/, ""); };
+          var mult = function (s) { return String(s || "").replace(/^x/i, "").replace(/\s*credits.*$/i, ""); };
+
+          var usedRows = [], restRows = [];
+          catalog.forEach(function (mi) {
+            var r = { id: String(mi.id || bare(mi.id)), credits: mult(mi.credits), u: used[bare(mi.id)] || null };
+            (r.u ? usedRows : restRows).push(r);
+          });
+          Object.keys(used).forEach(function (b) {
+            if (!usedRows.some(function (r) { return bare(r.id) === b; })) {
+              usedRows.push({ id: b, credits: "", u: used[b] });
+            }
+          });
+          if (!usedRows.length && !restRows.length) {
+            el.innerHTML = '<div class="wrc-hint">模型目录不可达 · 稍后重试</div>';
+            return;
+          }
+          usedRows.sort(function (a, b) { return b.u.credit - a.u.credit; });
+          restRows.sort(function (a, b) { return a.id < b.id ? -1 : a.id > b.id ? 1 : 0; });
+
+          function fmtTok(n) {
+            return n >= 1e8 ? (n / 1e8).toFixed(1) + "亿" : (n / 1e4).toFixed(0) + "万";
+          }
+
+          var html = '<div class="wrc-hint">官方倍率同官方 UI · 实测 = 累计积分 ÷ token（每千 token 扣分，随缓存命中浮动）</div>';
+          if (usedRows.length) {
+            html += '<table class="wrc-table"><thead><tr>' +
+              "<th>模型</th><th>官方</th><th>实测</th><th>积分</th><th>token</th><th>请求</th>" +
+              "</tr></thead><tbody>";
+            usedRows.forEach(function (r) {
+              html += "<tr><td>" + esc(r.id) + "</td>" +
+                '<td class="num">' + (r.credits ? esc(r.credits) + "x" : "—") + "</td>" +
+                '<td class="num">' + ((r.u.credit / r.u.tokens) * 1000).toFixed(4) + "</td>" +
+                '<td class="num">' + r.u.credit.toFixed(1) + "</td>" +
+                '<td class="num">' + fmtTok(r.u.tokens) + "</td>" +
+                '<td class="num">' + r.u.requests + "</td></tr>";
+            });
+            html += "</tbody></table>";
+          }
+          if (restRows.length) {
+            html += '<div class="wrc-sub">其余模型官方倍率 · ' + restRows.length + " 个未使用</div>";
+            html += '<div class="wrc-chips">';
+            restRows.forEach(function (r) {
+              html += '<span class="wrc-chip">' + esc(r.id) +
+                (r.credits ? " <b>" + esc(r.credits) + "x</b>" : "") + "</span>";
+            });
+            html += "</div>";
+          }
+          el.innerHTML = html;
+        }
+
         function renderStats(d) {
           if (!d || !d.ok) return;
           var t = (d.stats && d.stats.total) || {};
@@ -474,6 +594,7 @@ export default {
         }
 
         async function loadAll() {
+          var statsData = null, modelsData = null;
           try {
             var r = await fetch(BASE + "/status", { cache: "no-store" });
             renderPool(await r.json());
@@ -482,8 +603,14 @@ export default {
           }
           try {
             var r2 = await fetch(BASE + "/stats", { cache: "no-store" });
-            renderStats(await r2.json());
+            statsData = await r2.json();
+            renderStats(statsData);
           } catch (e) { /* stats 可选 */ }
+          try {
+            var r3 = await fetch(BASE + "/models", { cache: "no-store" });
+            modelsData = await r3.json();
+          } catch (e) { /* models 可选 */ }
+          renderRates(statsData, modelsData);
         }
 
         async function onAct(ev) {
