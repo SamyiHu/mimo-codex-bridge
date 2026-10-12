@@ -297,12 +297,15 @@ async function ensureTraeGateway() {
   const key = readText(TRAE_KEY_FILE);
   const q = (p) => p.replace(/'/g, "''");
   // 先把 key 写入注册表级环境（进程内 $env:）再 Start-Process，子进程继承
+  // TW2A_WORK_MODE=disabled：关 Work 通道探测（credits 实查里那步要发真对话 ping，
+  // 约 10 秒，是刷新慢的主因；面板从不使用 Work 积分）
   const start = await runCommand(
     "powershell",
     [
       "-NoProfile",
       "-Command",
       (key ? `$env:TW2A_API_KEY = '${q(key)}'; ` : "") +
+        `$env:TW2A_WORK_MODE = 'disabled'; ` +
         `$p = Start-Process -FilePath '${q(TRAE_EXE)}' ` +
         `-ArgumentList '-config','config.json' ` +
         `-WorkingDirectory '${q(TRAE_DIR)}' -WindowStyle Hidden ` +

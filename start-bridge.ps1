@@ -142,6 +142,8 @@ if ($Upstream -eq "trae") {
             if (-not $env:TW2A_API_KEY) {
                 Write-Host "未设置 TW2A_API_KEY（也读不到 trae-api-key.txt），网关将以无鉴权模式启动。" -ForegroundColor Yellow
             }
+            # 关 Work 通道：credits 实查的 Work 探测要发真对话 ping（约 10s），拖慢整页刷新
+            $env:TW2A_WORK_MODE = "disabled"
             Write-Host "启动 trae2api 网关…" -ForegroundColor Cyan
             $traeLogDir = Join-Path $traeDir "data"
             if (-not (Test-Path $traeLogDir)) { New-Item -ItemType Directory -Path $traeLogDir | Out-Null }
