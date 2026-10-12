@@ -9,6 +9,7 @@
  *   - 凭证 JSON 脱敏预览（/admin/api/accounts/{uid}/json）
  *   - 软启停 / 改昵称 / 删除 / 手动刷新 token
  *   - 积分/签到实查（上游实时额度 + 签到状态 + Work 积分）
+ *   - 模型倍率（直连 SOLO 模型目录解析 consumption_rate，服务端缓存 10 分钟）
  *   - 手动签到（面板直连 TRAE ug 域：status → claim → 查积分；凭证读 traeDir/auths）
  *     网关本身没有手动签到端点，每日 9 点调度签之外的补签由本插件完成。
  *   - 凭证导入：粘贴登录回调链接或 JSON
@@ -26,6 +27,14 @@ const EP_CHECKIN_STATUS = "/trae/api/v2/ug/checkin_credits/status";
 const EP_CHECKIN_CLAIM = "/trae/api/v2/ug/checkin_credits/claim";
 const EP_ENT_USAGE = "/trae/api/v2/pay/ide_user_ent_usage";
 const TRAE_UA = "Trae/0.1.52";
+
+// SOLO agent 域（模型目录）。trae2api 的 /v1/models 只透出模型名，
+// 消耗倍率（display_contact_config.consumption_rate）由面板直连上游解析。
+const AGENT_HOST = "https://trae-api-cn.mchost.guru";
+const EP_MODELS = "/api/ide/v1/get_detail_param";
+const TRAE_APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8";
+const TRAE_IDE_VERSION = "0.1.52";
+const TRAE_IDE_VERSION_CODE = "20260811";
 
 export default {
   id: "trae-accounts",
@@ -146,12 +155,14 @@ export default {
           ? {
               accessToken: obj.auth.accessToken,
               deviceId: obj.auth.deviceId,
+              machineId: obj.auth.machineId,
               uid: obj.account?.uid,
               nickname: obj.account?.nickname,
             }
           : {
               accessToken: obj?.accessToken,
               deviceId: obj?.deviceId,
+              machineId: obj?.machineId,
               uid: obj?.uid,
               nickname: obj?.nickname,
             };
@@ -184,6 +195,81 @@ export default {
         throw new Error(`非 JSON 响应：${text.slice(0, 120)}`);
       }
     }
+
+    /** SOLO agent 域请求（对齐 trae2api SOLOHeaders，非流式形态） */
+    async function soloPost(ep, auth, body, timeoutMs = 15000) {
+      const headers = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": TRAE_UA,
+        Authorization: `Cloud-IDE-JWT ${auth.accessToken}`,
+        "X-App-Id": TRAE_APP_ID,
+        "X-App-Version": "default",
+        "X-Ide-Version": TRAE_IDE_VERSION,
+        "X-Ide-Version-Code": TRAE_IDE_VERSION_CODE,
+        "X-App-Version-Code": TRAE_IDE_VERSION_CODE,
+        "X-Ide-Version-Type": "stable",
+        "X-Device-Type": "macos",
+        "X-OS-Version": "macOS 15.7.4",
+        "X-Device-Brand": "Apple",
+        "Request-Traffic-Type": "prod",
+      };
+      if (auth.uid) headers["X-Uid"] = auth.uid;
+      if (auth.machineId) headers["X-Machine-Id"] = auth.machineId;
+      if (auth.deviceId) headers["X-Device-Id"] = auth.deviceId;
+      const r = await fetch(`${AGENT_HOST}${ep}`, {
+        method: "POST",
+        headers,
+        body,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const text = await r.text();
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${text.slice(0, 120)}`);
+      return JSON.parse(text);
+    }
+
+    // 模型倍率：直连 SOLO get_detail_param，解析 display_contact_config.consumption_rate。
+    // 目录稳定，内存缓存 10 分钟，避免每次轮询都打上游。
+    let modelsCache = { at: 0, rows: null };
+    registerRoute("GET", "/models", async (req, res, { json }) => {
+      try {
+        if (modelsCache.rows && Date.now() - modelsCache.at < 10 * 60 * 1000) {
+          return json(res, 200, { ok: true, models: modelsCache.rows, cached: true });
+        }
+        const auth = loadAuths()[0];
+        if (!auth) return json(res, 200, { ok: false, error: "auths/ 里没有凭证" });
+        const data = await soloPost(
+          EP_MODELS,
+          auth,
+          JSON.stringify({
+            function: "solo_work_lite",
+            config_names: null,
+            need_prompt: false,
+            current_config_info: null,
+            poly_prompt: true,
+            mode_type: null,
+            agent_type: null,
+          }),
+        );
+        const rows = [];
+        for (const e of data.config_info_list || []) {
+          let rate = null;
+          try {
+            const cc = JSON.parse(e.display_contact_config || "{}");
+            if (cc?.consumption_rate?.enable) rate = cc.consumption_rate.data?.rate ?? null;
+          } catch {
+            /* 单条解析失败跳过 */
+          }
+          if (!e.config_name || rate == null) continue; // custom_model_* 占位与无倍率条目
+          rows.push({ id: e.config_name, name: e.display_config?.display_name || "", rate });
+        }
+        rows.sort((x, y) => y.rate - x.rate || x.id.localeCompare(y.id));
+        modelsCache = { at: Date.now(), rows };
+        return json(res, 200, { ok: true, models: rows });
+      } catch (error) {
+        return json(res, 200, { ok: false, error: String(error).slice(0, 160) });
+      }
+    });
 
     registerRoute("POST", "/checkin", async (req, res, { json, readBody }) => {
       const body = await readBody(req);
@@ -293,12 +379,36 @@ export default {
       <section class="card">
         <h2>Trae 账号池（插件）</h2>
         <div class="rows" id="wtr-accounts"><div class="empty">加载中…</div></div>
+        <div class="rows" id="wtr-rates"><div class="empty">模型倍率加载中…</div></div>
         <div class="actions">
           <button class="btn primary" type="button" id="wtr-login"><span class="btn-label">登录新账号</span></button>
           <button class="btn" type="button" id="wtr-credits"><span class="btn-label">积分/签到实查</span></button>
           <button class="btn" type="button" id="wtr-import-toggle"><span class="btn-label">导入凭证</span></button>
         </div>
         <style>
+          #wtr-rates { max-height: 340px; overflow: auto;
+            scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+          #wtr-rates::-webkit-scrollbar { width: 6px; }
+          #wtr-rates::-webkit-scrollbar-track { background: transparent; }
+          #wtr-rates::-webkit-scrollbar-button { display: none; }
+          #wtr-rates::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+          #wtr-rates::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+          #wtr-rates .wtr-hint { color: var(--muted); font-size: 11px; margin: 2px 0 8px; }
+          #wtr-rates table.wtr-table {
+            width: 100%; border-collapse: collapse;
+            font: 12px/1.6 ui-monospace, Consolas, monospace;
+          }
+          #wtr-rates .wtr-table th {
+            position: sticky; top: 0; background: var(--panel);
+            color: var(--muted); font-weight: normal; font-size: 11px;
+            text-align: right; padding: 3px 10px 4px 8px; border-bottom: 1px solid var(--line);
+          }
+          #wtr-rates .wtr-table td {
+            text-align: right; padding: 3px 10px 3px 8px;
+            border-bottom: 1px solid var(--line); color: var(--ink);
+          }
+          #wtr-rates .wtr-table th:first-child, #wtr-rates .wtr-table td:first-child { text-align: left; }
+          #wtr-rates .wtr-table td:nth-child(2) { text-align: left; color: var(--muted); }
           #wtr-login-box { display: none; margin: 8px 0 0; padding: 10px 12px;
             background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; }
           #wtr-login-box.show { display: block; }
@@ -631,6 +741,30 @@ export default {
           }
         }
 
+        // 模型倍率：直连上游解析的 consumption_rate，按倍率降序（贵的在上）
+        async function loadRates() {
+          var el = byId("wtr-rates");
+          try {
+            var r = await fetch(BASE + "/models", { cache: "no-store" });
+            var d = await r.json();
+            if (!d.ok || !(d.models || []).length) {
+              el.innerHTML = row("模型倍率", "（" + esc(d.error || "暂无数据") + "）");
+              return;
+            }
+            var html = '<div class="wtr-hint">消耗倍率来自 TRAE 模型目录（consumption_rate）· ' +
+              d.models.length + " 个模型 · 贵的在前</div>";
+            html += '<table class="wtr-table"><thead><tr><th>模型</th><th>名称</th><th>倍率</th></tr></thead><tbody>';
+            d.models.forEach(function (m) {
+              html += "<tr><td>" + esc(m.id) + "</td><td>" + esc(m.name || "—") +
+                '</td><td class="num">' + Number(m.rate).toFixed(2) + "x</td></tr>";
+            });
+            html += "</tbody></table>";
+            el.innerHTML = html;
+          } catch (e) {
+            el.innerHTML = row("模型倍率", esc(String(e)));
+          }
+        }
+
         byId("wtr-login").addEventListener("click", startLogin);
         byId("wtr-login-cancel").addEventListener("click", cancelLogin);
         byId("wtr-credits").addEventListener("click", function () { doCredits(false); });
@@ -640,6 +774,7 @@ export default {
         });
         byId("wtr-import-go").addEventListener("click", doImport);
         load();
+        loadRates(); // 目录稳定，启动拉一次即可（服务端缓存 10 分钟）
         // 首次加载自动实查一次积分，账号行直接显示真实值（不打扰，失败静默）
         setTimeout(function () { doCredits(true); }, 800);
         setInterval(load, 15000);
