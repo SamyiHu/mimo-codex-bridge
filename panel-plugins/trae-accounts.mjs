@@ -9,13 +9,23 @@
  *   - 凭证 JSON 脱敏预览（/admin/api/accounts/{uid}/json）
  *   - 软启停 / 改昵称 / 删除 / 手动刷新 token
  *   - 积分/签到实查（上游实时额度 + 签到状态 + Work 积分）
- *   - 手动签到（单号，上游 status → claim → 解冻冷却账号）
+ *   - 手动签到（面板直连 TRAE ug 域：status → claim → 查积分；凭证读 traeDir/auths）
+ *     网关本身没有手动签到端点，每日 9 点调度签之外的补签由本插件完成。
  *   - 凭证导入：粘贴登录回调链接或 JSON
  * 写操作经面板服务端代理注入 TW2A_API_KEY，key 不进浏览器。
  */
+import fs from "node:fs";
 import path from "node:path";
 
 const TRAE_KEY_FILE = "trae-api-key.txt"; // 相对 bridge 目录
+
+// TRAE ug 域（api.trae.cn）签到/积分接口常量，与 trae2api upstream/constants.go 同源。
+// 网关不提供手动签到端点，签到由面板直连上游完成（凭证读 trae2api 的 auths/）。
+const UG_HOST = "https://api.trae.cn";
+const EP_CHECKIN_STATUS = "/trae/api/v2/ug/checkin_credits/status";
+const EP_CHECKIN_CLAIM = "/trae/api/v2/ug/checkin_credits/claim";
+const EP_ENT_USAGE = "/trae/api/v2/pay/ide_user_ent_usage";
+const TRAE_UA = "Trae/0.1.52";
 
 export default {
   id: "trae-accounts",
@@ -115,13 +125,106 @@ export default {
       }
     });
 
-    // 手动签到：uid 缺省时遍历全部未禁用账号（上游语义：status → 未签则 claim → 解冻）
+    // ── 手动签到：直连 TRAE 上游（网关只读凭证，签到我们自己补） ──
+    // 语义对齐 trae2api scheduler.RunCheckinNow：status → 未签且可签则 claim → 查积分。
+    // uid 缺省遍历 auths/ 全部账号；凭证实时读盘（网关 refresh 后落盘，天然同步）。
+
+    /** 读 auths/ 下全部账号凭证（兼容嵌套形 {auth,account} 与扁平形） */
+    function loadAuths() {
+      const dir = path.join(settings().traeDir || path.join(process.env.USERPROFILE || "", ".trae2api"), "auths");
+      if (!fs.existsSync(dir)) return [];
+      const out = [];
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.startsWith("trae-") || !f.endsWith(".json")) continue;
+        let obj;
+        try {
+          obj = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+        } catch {
+          continue;
+        }
+        const rec = obj?.auth
+          ? {
+              accessToken: obj.auth.accessToken,
+              deviceId: obj.auth.deviceId,
+              uid: obj.account?.uid,
+              nickname: obj.account?.nickname,
+            }
+          : {
+              accessToken: obj?.accessToken,
+              deviceId: obj?.deviceId,
+              uid: obj?.uid,
+              nickname: obj?.nickname,
+            };
+        if (!rec.accessToken || !rec.uid) continue;
+        out.push(rec);
+      }
+      return out;
+    }
+
+    async function ugPost(ep, auth, body = "{}", timeoutMs = 15000) {
+      const headers = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": TRAE_UA,
+        Authorization: `Cloud-IDE-JWT ${auth.accessToken}`,
+        "X-User-Region": "CN",
+      };
+      if (auth.deviceId) headers["X-Device-Id"] = auth.deviceId;
+      const r = await fetch(`${UG_HOST}${ep}`, {
+        method: "POST",
+        headers,
+        body,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const text = await r.text();
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${text.slice(0, 120)}`);
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new Error(`非 JSON 响应：${text.slice(0, 120)}`);
+      }
+    }
+
     registerRoute("POST", "/checkin", async (req, res, { json, readBody }) => {
       const body = await readBody(req);
-      const uid = String(body.uid || "").trim();
+      const wantUid = String(body.uid || "").trim();
       try {
-        const r = await proxy("POST", "/admin/api/checkin", uid ? JSON.stringify({ uid }) : "{}", 60000);
-        return json(res, 200, { ok: r.ok, status: r.status, payload: r.payload });
+        let auths = loadAuths();
+        if (wantUid) auths = auths.filter((a) => a.uid === wantUid);
+        const results = [];
+        for (const a of auths) {
+          const item = { uid: a.uid, nickname: a.nickname, already_checked_in: false, claimed: false, remain: 0 };
+          try {
+            const st = await ugPost(EP_CHECKIN_STATUS, a);
+            item.already_checked_in = Boolean(st.checked_in);
+            if (!st.checked_in && st.enable) {
+              const cl = await ugPost(EP_CHECKIN_CLAIM, a, JSON.stringify({ req_source: 2 }));
+              if (cl.code !== 0 && cl.code !== undefined) {
+                item.error = `claim ${cl.code} ${cl.message || ""}`.trim();
+              } else {
+                item.claimed = true;
+              }
+            }
+            const usage = await ugPost(EP_ENT_USAGE, a);
+            const packs = Array.isArray(usage.user_entitlement_pack_list) ? usage.user_entitlement_pack_list : [];
+            let remain = 0;
+            for (const p of packs) {
+              const limit = p?.entitlement_base_info?.quota?.credits_limit || 0;
+              if (limit > 0) remain += limit - (p?.usage?.credits_amount || 0);
+            }
+            item.remain = Math.round(remain);
+          } catch (error) {
+            item.error = String(error).slice(0, 160);
+          }
+          results.push(item);
+        }
+        if (wantUid && !results.length) {
+          return json(res, 200, { ok: false, error: `auths/ 里没有 uid=${wantUid} 的凭证` });
+        }
+        return json(res, 200, {
+          ok: true,
+          payload: { checked_at: new Date().toISOString(), results },
+        });
       } catch (error) {
         return json(res, 200, { ok: false, error: String(error).slice(0, 160) });
       }

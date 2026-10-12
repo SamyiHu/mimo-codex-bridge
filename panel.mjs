@@ -1327,7 +1327,7 @@ ${pluginCards}
     }
 
     function doGateway() {
-      return runAction("启动 workbuddy2api 网关", {
+      return runAction("启动网关（workbuddy + trae）", {
         actionMeta: { kind: "gateway", target: "gateway" },
         send: () => post("/api/gateway", {}),
       });
@@ -1604,13 +1604,21 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "POST" && url.pathname === "/api/gateway") {
-    setAction("启动 workbuddy2api", "running", "正在拉起网关…");
-    void ensureGateway()
-      .then((gw) => {
-        setAction("启动 workbuddy2api", gw.ok ? "ok" : "fail", gw.detail);
+    setAction("启动网关", "running", "正在拉起 workbuddy2api / trae2api…");
+    // 两个网关都确保在跑（各自已在跑则跳过；未部署的只报提示）
+    Promise.allSettled([ensureGateway(), ensureTraeGateway()])
+      .then(([wb, trae]) => {
+        const wbR = wb.status === "fulfilled" ? wb.value : { ok: false, detail: String(wb.reason) };
+        const trR = trae.status === "fulfilled" ? trae.value : { ok: false, detail: String(trae.reason) };
+        const ok = wbR.ok && trR.ok;
+        setAction(
+          "启动网关",
+          ok ? "ok" : "fail",
+          `workbuddy2api：${wbR.detail} · trae2api：${trR.detail}`,
+        );
       })
       .catch((error) => {
-        setAction("启动 workbuddy2api", "fail", String(error));
+        setAction("启动网关", "fail", String(error));
       });
     res.writeHead(202, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: true, accepted: true }));
@@ -1678,6 +1686,18 @@ server.listen(PORT, "127.0.0.1", () => {
     })
     .catch((error) => {
       console.log(`[panel] workbuddy2api 启动检查失败：${error}`);
+    });
+  // 一并拉起 trae2api（已在跑则跳过；未部署时仅提示）
+  ensureTraeGateway()
+    .then((gw) => {
+      console.log(
+        gw.started
+          ? `[panel] trae2api 已拉起：${gw.detail}`
+          : `[panel] trae2api：${gw.detail}`,
+      );
+    })
+    .catch((error) => {
+      console.log(`[panel] trae2api 启动检查失败：${error}`);
     });
 });
 
