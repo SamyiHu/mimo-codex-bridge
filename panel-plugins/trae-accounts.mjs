@@ -254,14 +254,32 @@ export default {
         const rows = [];
         for (const e of data.config_info_list || []) {
           let rate = null;
+          let memberRate = null;
+          let matched = false;
           try {
             const cc = JSON.parse(e.display_contact_config || "{}");
-            if (cc?.consumption_rate?.enable) rate = cc.consumption_rate.data?.rate ?? null;
+            if (cc?.consumption_rate?.enable) {
+              rate = cc.consumption_rate.data?.rate ?? null;
+              // 会员折扣：original 是原价（账号若已是会员，顶层 rate 可能已是折后价，
+              // 原价一律以 original_consumption_rate 为准）；consumption_rate 是会员价
+              const d = cc.discount;
+              if (d?.enable) {
+                memberRate = d.data?.consumption_rate ?? null;
+                rate = d.data?.original_consumption_rate ?? rate;
+                matched = Boolean(d.data?.is_discount_matched);
+              }
+            }
           } catch {
             /* 单条解析失败跳过 */
           }
           if (!e.config_name || rate == null) continue; // custom_model_* 占位与无倍率条目
-          rows.push({ id: e.config_name, name: e.display_config?.display_name || "", rate });
+          rows.push({
+            id: e.config_name,
+            name: e.display_config?.display_name || "",
+            rate,
+            memberRate,
+            matched,
+          });
         }
         rows.sort((x, y) => y.rate - x.rate || x.id.localeCompare(y.id));
         modelsCache = { at: Date.now(), rows };
@@ -751,12 +769,16 @@ export default {
               el.innerHTML = row("模型倍率", "（" + esc(d.error || "暂无数据") + "）");
               return;
             }
-            var html = '<div class="wtr-hint">消耗倍率来自 TRAE 模型目录（consumption_rate）· ' +
-              d.models.length + " 个模型 · 贵的在前</div>";
-            html += '<table class="wtr-table"><thead><tr><th>模型</th><th>名称</th><th>倍率</th></tr></thead><tbody>';
+            var html = '<div class="wtr-hint">消耗倍率来自 TRAE 模型目录 · ' +
+              d.models.length + " 个模型 · 贵的在前 · 会员列为 TRAE 会员折后价</div>";
+            html += '<table class="wtr-table"><thead><tr><th>模型</th><th>名称</th><th>倍率</th><th>会员</th></tr></thead><tbody>';
             d.models.forEach(function (m) {
+              var member = m.memberRate != null
+                ? Number(m.memberRate).toFixed(2) + "x" + (m.matched ? " ✓" : "")
+                : "—";
               html += "<tr><td>" + esc(m.id) + "</td><td>" + esc(m.name || "—") +
-                '</td><td class="num">' + Number(m.rate).toFixed(2) + "x</td></tr>";
+                '</td><td class="num">' + Number(m.rate).toFixed(2) + "x</td>" +
+                '<td class="num">' + member + "</td></tr>";
             });
             html += "</tbody></table>";
             el.innerHTML = html;
