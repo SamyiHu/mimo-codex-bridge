@@ -79,6 +79,11 @@ const models = catalogRaw
 // Doubao 256k / aquila 272k / seed 233k 这类非整值疑似模型原生上限，保留不动。
 for (const m of models) {
   if (m.contextWindow === 200000) m.contextWindow = 1000000;
+  // 思考档位：实测（2026-10-12，glm-5.2 / glm-5.3-flash / DeepSeek-V4-Pro / kimi-k3）
+  // low→max 五档全部 HTTP 200 且都输出 reasoning_content，但 low/max 的思考长度
+  // 无单调关系——上游接受该参数但大概率忽略（思考常开）。目录里暴露全档位仅为
+  // Codex 选择器兼容。
+  m.reasoningLevels = ["low", "medium", "high", "xhigh", "max"];
 }
 
 // ── 组装 settings_config：以 workbuddy 行为模板做三处替换 ──
