@@ -73,6 +73,14 @@ const models = catalogRaw
     contextWindow: Number(e.context_window_tokens?.dev || 0) || undefined,
   }));
 
+// 上游 get_detail_param 的 context_window_tokens 是过时的通道值：目录还写 200k，
+// 但 2026-10-12 实测（glm-5.3 收 21.4 万 token、glm-5.3-flash 收 95 万 token 均
+// HTTP 200）免费通道已放开到 1M。整齐的 200k/168k/32k 是通道级配置，统一覆写；
+// Doubao 256k / aquila 272k / seed 233k 这类非整值疑似模型原生上限，保留不动。
+for (const m of models) {
+  if (m.contextWindow === 200000) m.contextWindow = 1000000;
+}
+
 // ── 组装 settings_config：以 workbuddy 行为模板做三处替换 ──
 const db = new DatabaseSync(DB_PATH);
 const wb = db
@@ -82,14 +90,20 @@ if (!wb) throw new Error("cc-switch 里没有 workbuddy-bridge-codex 行，没�
 
 const wbSettings = JSON.parse(wb.settings_config);
 let toml = String(wbSettings.config || "");
+// 值无关替换：模板行的具体值会被 cc-switch 随 live 配置回写（model 换过几次了），
+// 只按行的形态定位，不依赖旧值。
 const swaps = [
-  [/model_provider = "workbuddy"/, 'model_provider = "trae"'],
-  [/model = "cn:hy3-b"/, 'model = "glm-5.2"'],
-  [/\[model_providers\.workbuddy\]\nname = "workbuddy"/, '[model_providers.trae]\nname = "trae"'],
+  [/^model_provider = ".*"$/m, 'model_provider = "trae"'],
+  [/^model = ".*"$/m, 'model = "glm-5.2"'],
+  [/\[model_providers\.workbuddy\]\nname = ".*"/, '[model_providers.trae]\nname = "trae"'],
 ];
 for (const [re, to] of swaps) {
   if (!re.test(toml)) throw new Error(`模板 TOML 里找不到 ${re}`);
   toml = toml.replace(re, to);
+}
+if (!/\[model_providers\.trae\]/.test(toml)) {
+  // 模板里连 workbuddy 节都没有（被改写掉了）就补一个
+  toml += `\n[model_providers.trae]\nname = "trae"\nbase_url = "http://127.0.0.1:8788/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nexperimental_bearer_token = "${SECRET}"\n`;
 }
 // 密钥以当前 bridge-secret.txt 为准（模板里的可能是旧值）
 toml = toml.replaceAll(String(wbSettings.auth?.OPENAI_API_KEY || ""), SECRET);
