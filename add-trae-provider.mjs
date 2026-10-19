@@ -73,12 +73,14 @@ const models = catalogRaw
     contextWindow: Number(e.context_window_tokens?.dev || 0) || undefined,
   }));
 
-// 上游 get_detail_param 的 context_window_tokens 是过时的通道值：目录还写 200k，
-// 但 2026-10-12 实测（glm-5.3 收 21.4 万 token、glm-5.3-flash 收 95 万 token 均
-// HTTP 200）免费通道已放开到 1M。整齐的 200k/168k/32k 是通道级配置，统一覆写；
-// Doubao 256k / aquila 272k / seed 233k 这类非整值疑似模型原生上限，保留不动。
+// context_window 一律如实透传上游 context_window_tokens.dev，不做任何改写。
+// 2026-10-19 实测：上游目录至今仍写 200k（GLM/DeepSeek 全系 21 条）；2026-10-12 那次
+// 「大 prompt 收 HTTP 200」只证明通道**接受**了更长输入，不证明目录声明的上限被改。
+// 而且超限时上游照样返回 HTTP 200（错误藏在 SSE event:error，code=4026/4022），
+// 所以 catalog 里的值必须等于上游声明值，否则 Codex 会按虚高窗口规划上下文。
+// 「实测可吃更长」只作日志附注，绝不改写 context_window / max_context_window。
+const OBSERVED_CONTEXT_WINDOW_HINT = 1048576; // 2026-10-19 实测 deepseek-v4.1-flash 1,047,976 tok 仍 200
 for (const m of models) {
-  if (m.contextWindow === 200000) m.contextWindow = 1000000;
   // 思考档位：实测（2026-10-12，glm-5.2 / glm-5.3-flash / DeepSeek-V4-Pro / kimi-k3）
   // low→max 五档全部 HTTP 200 且都输出 reasoning_content，但 low/max 的思考长度
   // 无单调关系——上游接受该参数但大概率忽略（思考常开）。目录里暴露全档位仅为
@@ -101,6 +103,8 @@ const swaps = [
   [/^model_provider = ".*"$/m, 'model_provider = "trae"'],
   [/^model = ".*"$/m, 'model = "glm-5.2"'],
   [/\[model_providers\.workbuddy\]\nname = ".*"/, '[model_providers.trae]\nname = "trae"'],
+  // 目录行必须跟着换，否则切到 trae 后选择器加载的还是 workbuddy 的 cn:* 目录
+  [/^model_catalog_json = ".*"$/m, 'model_catalog_json = "trae-models.json"'],
 ];
 for (const [re, to] of swaps) {
   if (!re.test(toml)) throw new Error(`模板 TOML 里找不到 ${re}`);
@@ -140,8 +144,12 @@ const row = {
   cost_multiplier: "1.0",
 };
 
-console.log(`[trae-provider] 模型目录 ${models.length} 个：`);
+console.log(`[trae-provider] 模型目录 ${models.length} 个（context_window 为上游声明值，未改写）：`);
 for (const m of models) console.log(`  ${m.model}${m.contextWindow ? ` (${Math.round(m.contextWindow / 1000)}k)` : ""}`);
+console.log(
+  `[trae-provider] 附注：2026-10-19 实测通道可接受约 ${Math.round(OBSERVED_CONTEXT_WINDOW_HINT / 1000)}k token，` +
+    "但 catalog 只写上游声明值（超限时上游仍返回 HTTP 200 + SSE error 4026，不可据此放大窗口）。",
+);
 
 if (dryRun) {
   console.log("[trae-provider] dry-run，未写入。settings_config 长度 " + settingsConfig.length);
