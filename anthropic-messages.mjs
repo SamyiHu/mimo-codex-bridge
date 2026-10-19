@@ -552,6 +552,19 @@ export function toAnthropicMessage(chatResponse, request = {}, options = {}) {
     finalOutputTokens = estimateResponsesOutputTokens(content);
   }
 
+  // 缓存命中：OpenAI 风格 prompt_tokens_details.cached_tokens（trae2api p2 起
+  // 自带）或 Anthropic 风格顶层字段。Anthropic 语义里 input_tokens 不含缓存部分，
+  // 而 trae 的 prompt_tokens 是含的，这里换算，Claude Code 才能显示「来自缓存」。
+  const cachedTokens = extractCachedInputTokens(usage);
+  const anthropicUsage = {
+    input_tokens: Math.max(0, inputTokens - cachedTokens) ||
+      Number(options.estimatedInputTokens || 0),
+    output_tokens: finalOutputTokens,
+  };
+  if (cachedTokens > 0) {
+    anthropicUsage.cache_read_input_tokens = cachedTokens;
+  }
+
   return {
     id: chatResponse?.id || uid("msg_"),
     type: "message",
@@ -560,11 +573,16 @@ export function toAnthropicMessage(chatResponse, request = {}, options = {}) {
     content,
     stop_reason: stopReasonFromChat(choice.finish_reason, toolCalls.length > 0),
     stop_sequence: null,
-    usage: {
-      input_tokens: inputTokens || Number(options.estimatedInputTokens || 0),
-      output_tokens: finalOutputTokens,
-    },
+    usage: anthropicUsage,
   };
+}
+
+// 从 OpenAI / Anthropic 两种 usage 风格里取缓存命中的输入 token 数。
+function extractCachedInputTokens(usage) {
+  const fromDetails = Number(usage?.prompt_tokens_details?.cached_tokens);
+  if (Number.isFinite(fromDetails) && fromDetails > 0) return fromDetails;
+  const topLevel = Number(usage?.cache_read_input_tokens);
+  return Number.isFinite(topLevel) && topLevel > 0 ? topLevel : 0;
 }
 
 function anthropicEvent(name, data) {
@@ -596,6 +614,7 @@ export function createAnthropicStreamTranslator(request = {}, options = {}) {
     usage: {
       input_tokens: estimatedInputTokens,
       output_tokens: 0,
+      cache_read_input_tokens: 0,
     },
     sawUsage: false,
     stopReason: null,
@@ -688,6 +707,10 @@ export function createAnthropicStreamTranslator(request = {}, options = {}) {
         if (Number.isFinite(Number(chunk.usage.completion_tokens))) {
           state.usage.output_tokens = Number(chunk.usage.completion_tokens);
         }
+        // 缓存命中（trae2api p2 起 usage 自带 cached_tokens），
+        // Anthropic 语义里 input_tokens 不含缓存部分，end() 统一扣减。
+        const cached = extractCachedInputTokens(chunk.usage);
+        if (cached > 0) state.usage.cache_read_input_tokens = cached;
       }
 
       const choice = chunk.choices?.[0];
@@ -777,6 +800,14 @@ export function createAnthropicStreamTranslator(request = {}, options = {}) {
         state.stopReason = state.toolBlocks.size ? "tool_use" : "end_turn";
       }
 
+      const finalUsage = {
+        // Anthropic 语义：input_tokens 不含缓存命中部分，缓存单列。
+        input_tokens: Math.max(0, state.usage.input_tokens - state.usage.cache_read_input_tokens),
+        output_tokens: state.usage.output_tokens,
+      };
+      if (state.usage.cache_read_input_tokens > 0) {
+        finalUsage.cache_read_input_tokens = state.usage.cache_read_input_tokens;
+      }
       events.push(
         anthropicEvent("message_delta", {
           type: "message_delta",
@@ -784,9 +815,7 @@ export function createAnthropicStreamTranslator(request = {}, options = {}) {
             stop_reason: state.stopReason,
             stop_sequence: null,
           },
-          usage: {
-            output_tokens: state.usage.output_tokens,
-          },
+          usage: finalUsage,
         }),
       );
       events.push(anthropicEvent("message_stop", { type: "message_stop" }));

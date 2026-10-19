@@ -116,6 +116,38 @@ const MODEL_FALLBACK = argOf(
 const TOKEN_ESTIMATE_ENABLED = !/^(0|off|false)$/i.test(
   process.env.MIMO_BRIDGE_TOKEN_ESTIMATE || "1",
 );
+// ── Trae 上游元数据补齐（2026-10-19 实测）─────────────────────────────
+// 上游两条通道都不给全模型元数据：
+//   · get_detail_param / trae2api /v1/models 只有 context_length（上下文窗口），
+//     没有最大输出数；max_tokens 塞 999999 也照单全收，问不出真实上限。
+//   · usage 里的缓存命中的确有，但用的是 Anthropic 风格字段
+//     （cache_read_input_tokens），OpenAI 客户端读的
+//     prompt_tokens_details.cached_tokens 永远是空。
+// 桥这一层补齐：/v1/models 加字段别名并过滤内部模型；usage 做字段风格转换。
+// 最大输出数是保守默认值（不是上游声明），实测出真实上限后写进覆盖表。
+const TRAE_DEFAULT_MAX_OUTPUT = Math.max(
+  1024,
+  intFrom(process.env.BRIDGE_TRAE_MAX_OUTPUT_TOKENS || 32768, 32768),
+);
+let TRAE_MAX_OUTPUT_OVERRIDES = {};
+try {
+  TRAE_MAX_OUTPUT_OVERRIDES = JSON.parse(
+    process.env.BRIDGE_TRAE_MAX_OUTPUT_OVERRIDES || "{}",
+  );
+} catch (error) {
+  console.warn(
+    "[bridge] BRIDGE_TRAE_MAX_OUTPUT_OVERRIDES 不是合法 JSON，已忽略：" +
+      String(error?.message ?? error),
+  );
+}
+// trae 目录里的内部 subagent 与 custom_model_* 自定义槽位，不进客户端选择器。
+const TRAE_INTERNAL_MODELS = new Set([
+  "computer_use_subagent",
+  "browser_use_subagent",
+  "file_search_agent",
+  "explore_sub_agent_v2",
+  "summary",
+]);
 const ENGINE_URL = (
 
   argOf(
@@ -1378,6 +1410,201 @@ async function proxyAnthropicStream({
   }
 }
 
+// trae 上游 usage 的缓存字段是 Anthropic 风格（cache_read_input_tokens /
+// reasoning_tokens 顶层平铺），OpenAI 客户端读的是 prompt_tokens_details.cached_tokens
+// 和 completion_tokens_details.reasoning_tokens，不转就永远显示不出缓存命中。
+// trae2api p2 之后上游已自带 OpenAI 风格字段，这里只在缺失时补，绝不覆盖。
+function decorateUpstreamUsage(usage, { fillZero = false } = {}) {
+  if (!usage || typeof usage !== "object") return usage;
+  const next = { ...usage };
+  const cacheRead = Number(usage.cache_read_input_tokens);
+  const reasoning = Number(usage.reasoning_tokens);
+  if (usage.cache_read_input_tokens !== undefined || fillZero) {
+    const details = { ...(next.prompt_tokens_details ?? {}) };
+    if (details.cached_tokens === undefined) {
+      details.cached_tokens =
+        Number.isFinite(cacheRead) && cacheRead > 0 ? cacheRead : 0;
+    }
+    next.prompt_tokens_details = details;
+  }
+  if (
+    Number.isFinite(reasoning) &&
+    reasoning > 0 &&
+    next.completion_tokens_details?.reasoning_tokens === undefined
+  ) {
+    next.completion_tokens_details = {
+      ...(next.completion_tokens_details ?? {}),
+      reasoning_tokens: reasoning,
+    };
+  }
+  return next;
+}
+
+// /v1/models 的 trae 补齐：过滤内部 subagent（custom_model_* 是用户自定义槽位，
+// 保留），并在 trae2api 未补齐字段时兜底加上下文窗口别名与最大输出数。
+// trae2api p2 之后这些字段上游已自带，这里全部只在缺失时补。
+function enrichTraeModelsList(payload) {
+  if (!Array.isArray(payload?.data)) return payload;
+  payload.data = payload.data.filter((model) => {
+    const id = String(model?.id ?? "");
+    return !!id && !TRAE_INTERNAL_MODELS.has(id);
+  });
+  for (const model of payload.data) {
+    const contextLength = Number(model.context_length) || 0;
+    if (contextLength > 0) {
+      // 字段别名矩阵：trae2api p3 起上游已自带全套；这里只在缺失时兜底
+      // （客户端直连桥、或上游旧版时会走到）。
+      if (model.context_window === undefined) model.context_window = contextLength;
+      if (model.contextWindow === undefined) model.contextWindow = contextLength;
+      if (model.max_input_tokens === undefined) model.max_input_tokens = contextLength;
+    }
+    const maxOutput =
+      TRAE_MAX_OUTPUT_OVERRIDES[String(model.id).toLowerCase()] ??
+      TRAE_DEFAULT_MAX_OUTPUT;
+    if (model.max_tokens === undefined) model.max_tokens = maxOutput;
+    if (model.max_completion_tokens === undefined) {
+      model.max_completion_tokens = maxOutput;
+    }
+    if (model.max_output_tokens === undefined) {
+      model.max_output_tokens = maxOutput;
+    }
+    if (model.maxOutputTokens === undefined) model.maxOutputTokens = maxOutput;
+    if (model.top_provider === undefined) {
+      model.top_provider = {
+        context_length: contextLength,
+        max_completion_tokens: maxOutput,
+      };
+    }
+  }
+  return payload;
+}
+
+// GET /v1/models：拉上游列表，trae 上游补齐元数据后下发。原先是原样透传，
+// 客户端只能拿到 context_length，最大输出数一概没有。
+async function handleModelsList(req, res, requestId) {
+  const base = await discoverEngine();
+  if (!base) {
+    return sendError(
+      res,
+      503,
+      PASSTHROUGH_UPSTREAM
+        ? `${UPSTREAM_KIND} gateway not found; start it on the configured upstream URL`
+        : "MiMo Desktop engine not found",
+      requestId,
+    );
+  }
+  const url = new URL(base + "/v1/models");
+  if (UPSTREAM_KIND === "mimo") {
+    url.searchParams.set("directory", INSTANCE_DIR);
+  }
+  const abortContext = createAbortContext();
+  let upstream;
+  try {
+    upstream = await fetchUpstream(
+      url,
+      { method: "GET" },
+      abortContext,
+      requestId,
+      req.headers.accept || "*/*",
+    );
+  } catch (error) {
+    abortContext.dispose();
+    return sendError(
+      res,
+      502,
+      "upstream failed: " + String(error?.message ?? error),
+      requestId,
+      "upstream_transport",
+    );
+  }
+  abortContext.dispose();
+  if (!upstream.ok) {
+    const message = await readUpstreamError(upstream);
+    return sendError(res, upstream.status, message, requestId);
+  }
+  const payload = await upstream.json().catch(() => null);
+  if (!payload || !Array.isArray(payload.data)) {
+    metrics.observeError("invalid_upstream_response");
+    return sendError(
+      res,
+      502,
+      "upstream returned invalid JSON",
+      requestId,
+      "invalid_upstream_response",
+    );
+  }
+  if (UPSTREAM_KIND === "trae") enrichTraeModelsList(payload);
+  return sendJson(res, 200, payload, requestId);
+}
+
+// SSE 的 data: 行里若带 usage（通常是最后一个 chunk），转成 OpenAI 风格缓存字段。
+function decorateSseDataLine(line) {
+  if (!line.startsWith("data:")) return line;
+  const data = line.slice(5).trimStart();
+  if (!data || data === "[DONE]") return line;
+  try {
+    const parsed = JSON.parse(data);
+    if (parsed && typeof parsed === "object" && parsed.usage) {
+      parsed.usage = decorateUpstreamUsage(parsed.usage, { fillZero: true });
+      return "data: " + JSON.stringify(parsed);
+    }
+  } catch {}
+  return line;
+}
+
+// 普通 /v1/chat/completions 的透传：流式/非流式两个形态都把 usage 里的
+// Anthropic 风格缓存字段换成 OpenAI 风格，客户端才能显示缓存命中。
+async function proxyChatUpstream({ req, res, upstream, requestId }) {
+  if (UPSTREAM_KIND !== "trae") {
+    return proxyPassThrough({ req, res, upstream, requestId });
+  }
+  const contentType =
+    upstream.headers.get("content-type") || "application/json; charset=utf-8";
+
+  if (/text\/event-stream/i.test(contentType)) {
+    res.writeHead(upstream.status, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Request-ID": requestId,
+    });
+    const upstreamRequestId = upstream.headers.get("x-request-id");
+    if (upstreamRequestId) res.setHeader("X-Upstream-Request-ID", upstreamRequestId);
+    let pending = "";
+    try {
+      for await (const chunk of upstream.body) {
+        if (res.destroyed) break;
+        pending += Buffer.from(chunk).toString("utf8");
+        let newlineAt;
+        while ((newlineAt = pending.indexOf("\n")) >= 0) {
+          const line = pending.slice(0, newlineAt);
+          pending = pending.slice(newlineAt + 1);
+          res.write(decorateSseDataLine(line) + "\n");
+        }
+      }
+      if (pending) res.write(decorateSseDataLine(pending));
+    } finally {
+      res.end();
+    }
+    return;
+  }
+
+  const payload = await upstream.json().catch(() => null);
+  if (!payload || typeof payload !== "object") {
+    metrics.observeError("invalid_upstream_response");
+    return sendError(
+      res,
+      502,
+      "upstream returned invalid JSON",
+      requestId,
+      "invalid_upstream_response",
+    );
+  }
+  if (payload.usage) {
+    payload.usage = decorateUpstreamUsage(payload.usage, { fillZero: true });
+  }
+  return sendJson(res, upstream.status, payload, requestId);
+}
+
 async function proxyPassThrough({
   req,
   res,
@@ -1636,6 +1863,11 @@ async function handleApiRequest(req, res, metricState = null) {
       `MiMo upstream circuit is open; retry in ${retryAfterSeconds}s`,
       anthropicApi ? "overloaded_error" : "circuit_open",
     );
+  }
+
+  // 模型列表要按上游种类补元数据（trae 缺最大输出数/字段别名），单独走。
+  if (req.method === "GET" && requestPath === "/v1/models") {
+    return handleModelsList(req, res, requestId);
   }
 
   let body = {};
@@ -2118,7 +2350,7 @@ async function handleApiRequest(req, res, metricState = null) {
           abortContext.dispose();
           return sendError(res, upstream.status, message, requestId);
         }
-        await proxyPassThrough({ req, res, upstream, requestId });
+        await proxyChatUpstream({ req, res, upstream, requestId });
       }
 
       abortContext.dispose();
