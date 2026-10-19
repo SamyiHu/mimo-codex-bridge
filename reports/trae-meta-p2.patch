@@ -1,0 +1,419 @@
+diff --git a/internal/server/handler.go b/internal/server/handler.go
+index 7c348e0..d3ebd79 100644
+--- a/internal/server/handler.go
++++ b/internal/server/handler.go
+@@ -11,6 +11,8 @@ import (
+ 	"fmt"
+ 	"io"
+ 	"net/http"
++	"os"
++	"strconv"
+ 	"strings"
+ 	"sync"
+ 	"time"
+@@ -292,10 +294,131 @@ const (
+ 	modelsFetchFailCooldown = 5 * time.Minute
+ )
+ 
++// 内部 subagent 条目是 Trae IDE 自用的，不进 OpenAI 兼容模型列表；
++// custom_model_* 是用户在 IDE 里配置的自定义槽位，保留。
++var internalModelIDs = map[string]bool{
++	"computer_use_subagent": true,
++	"browser_use_subagent":  true,
++	"file_search_agent":     true,
++	"explore_sub_agent_v2":  true,
++	"summary":               true,
++}
++
++// defaultMaxOutputTokens 上游不披露最大输出数（get_detail_param 无此字段，
++// 请求里塞 max_tokens=999999 也照单全收），只能给保守默认值；
++// 环境变量 TW2A_MAX_OUTPUT_TOKENS 可整体覆盖。
++var defaultMaxOutputTokens = func() int64 {
++	if v := os.Getenv("TW2A_MAX_OUTPUT_TOKENS"); v != "" {
++		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
++			return n
++		}
++	}
++	return 32768
++}()
++
++// contextWindowOverrides 实测覆盖：上游目录的 context_window_tokens.dev 是保守
++// 通道值（例如 glm-5.2 声明 200k、实测可完整处理 1,030,486 tok）。以下为
++// 2026-10-19 黑盒阶梯实测的输入侧真实上限（原始数据见仓库
++// reports/trae-ctx-measurements.json）；实测声明值即真实上限的模型
++// （glm-5、Doubao-Seed-2.1-Turbo、Doubao-Seed-2.0-Code）和未测模型不覆盖，
++// 走协议声明值。TW2A_CONTEXT_WINDOW_OVERRIDES 环境变量可用 JSON 追加
++// （小写模型名 → token 数）。
++var contextWindowOverrides = map[string]int64{
++	"deepseek-v4.1-flash":  1000000,
++	"glm-5.3-flash":        1000000,
++	"glm-5.3-flashx":       1000000,
++	"glm-5.2":              1000000,
++	"glm-5-turbo":          1000000,
++	"kimi-k3":              1000000,
++	"glm-5.3":              390000,
++	"deepseek-v4-flash":    390000,
++	"deepseek-v4-pro":      390000,
++	"seed-code-pro-0430":   460000,
++	"doubao-seed-2.1-pro":  500000,
++	"doubao-seed-evolving": 500000,
++	"kimi-k2.7-code":       230000,
++}
++
++func init() {
++	if v := os.Getenv("TW2A_CONTEXT_WINDOW_OVERRIDES"); v != "" {
++		var m map[string]int64
++		if err := json.Unmarshal([]byte(v), &m); err == nil {
++			for k, n := range m {
++				if n > 0 {
++					contextWindowOverrides[strings.ToLower(k)] = n
++				}
++			}
++		}
++	}
++}
++
+ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
++	// 上游目录只给 context_length；这里补齐常见客户端读的字段别名与
++	// 最大输出数（保守默认），并滤掉内部 subagent。
++	out := make([]map[string]any, 0, len(staticModels))
++	for _, entry := range h.modelList() {
++		id, _ := entry["id"].(string)
++		if internalModelIDs[id] {
++			continue
++		}
++		// 静态表是包级共享的 map，不能原地改；复制一份再补字段。
++		enriched := make(map[string]any, len(entry)+4)
++		for k, v := range entry {
++			enriched[k] = v
++		}
++		var contextLength int64
++		switch v := enriched["context_length"].(type) {
++		case int64:
++			contextLength = v
++		case int:
++			contextLength = int64(v)
++		}
++		overridden := false
++		if ov, ok := contextWindowOverrides[strings.ToLower(id)]; ok && ov > 0 {
++			contextLength = ov
++			enriched["context_length"] = ov
++			overridden = true
++		}
++		// 最大输出：优先协议明文 max_tokens（model_detail_list[0]），缺省保守默认。
++		maxOut := defaultMaxOutputTokens
++		if v, ok := enriched["max_tokens"].(int64); ok && v > 0 {
++			maxOut = v
++		}
++		// 输入预算：协议 prompt_max_tokens（= ctx − 输出预留）；实测覆盖的模型
++		// 直接用实测值（黑盒测的就是输入侧上限）。
++		maxInput := contextLength
++		if !overridden {
++			if v, ok := enriched["prompt_max_tokens"].(int64); ok && v > 0 {
++				maxInput = v
++			}
++		}
++		if contextLength > 0 {
++			enriched["context_window"] = contextLength
++			enriched["contextWindow"] = contextLength
++		}
++		// max_context_window：Max 模式上限 2^20（实测死线 ~1.048M）；
++		// 无 Max 的模型 = 常规窗口。
++		maxCtx := contextLength
++		if _, isMax := enriched["max_mode"].(bool); isMax || contextLength >= 1000000 {
++			maxCtx = 1048576
++		}
++		enriched["max_context_window"] = maxCtx
++		if maxInput > 0 {
++			enriched["max_input_tokens"] = maxInput
++		}
++		enriched["max_tokens"] = maxOut
++		enriched["max_completion_tokens"] = maxOut
++		enriched["max_output_tokens"] = maxOut
++		enriched["maxOutputTokens"] = maxOut
++		enriched["top_provider"] = map[string]any{
++			"context_length":        contextLength,
++			"max_completion_tokens": maxOut,
++		}
++		out = append(out, enriched)
++	}
+ 	writeJSON(w, http.StatusOK, map[string]any{
+ 		"object": "list",
+-		"data":   h.modelList(),
++		"data":   out,
+ 	})
+ }
+ 
+@@ -311,9 +434,21 @@ func (h *Handler) modelList() []map[string]any {
+ 				"owned_by":       "trae-solo",
+ 				"context_length": mi.ContextWindow,
+ 			}
+-			if entry["context_length"] == 0 {
++			if mi.ContextWindow <= 0 {
+ 				entry["context_length"] = 131072
+ 			}
++			// 协议明文真实参数（model_detail_list）：最大输出与输入预算。
++			if mi.MaxTokens > 0 {
++				entry["max_tokens"] = mi.MaxTokens
++			}
++			if mi.PromptMaxTokens > 0 {
++				entry["prompt_max_tokens"] = mi.PromptMaxTokens
++			}
++			// Trae Max 模式（1M 突破）标记；注意套餐级 max_mode_plan_all
++			// 可对全模型放开，目录里 false 不代表账号不可用。
++			if mi.MaxMode {
++				entry["max_mode"] = true
++			}
+ 			out = append(out, entry)
+ 		}
+ 		return out
+@@ -690,6 +825,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+ 				switch se.Kind() {
+ 				case upstream.ErrPlanLimit:
+ 					h.cfg.Pool.Cooldown(acct.UID, pool.CoolPlan, h.cfg.PlanCooldown, "plan 权益不足")
++				case upstream.ErrContextTooLong:
++					// 4026/4022 上下文超限是调用方的问题，换号也会一样超：
++					// 不冷却、不计错，让错误原样透出。
+ 				default:
+ 					h.cfg.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
+ 				}
+@@ -727,6 +865,8 @@ func (h *Handler) handleStreamError(uid string, se *upstream.SOLOStreamError) {
+ 		h.cfg.Pool.Cooldown(uid, pool.CoolPlan, h.cfg.PlanCooldown, "plan 权益不足")
+ 	case upstream.ErrSoftRate:
+ 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "429 rate limit")
++	case upstream.ErrContextTooLong:
++		// 4026/4022 上下文超限：请求级错误，不冷却账号。
+ 	default:
+ 		h.cfg.Pool.NoteError(uid, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
+ 	}
+diff --git a/internal/server/handler_test.go b/internal/server/handler_test.go
+index 5f83225..af9f2ff 100644
+--- a/internal/server/handler_test.go
++++ b/internal/server/handler_test.go
+@@ -233,13 +233,24 @@ func TestModelsEndpoint(t *testing.T) {
+ 		t.Errorf("object=%v", resp["object"])
+ 	}
+ 	data := resp["data"].([]any)
+-	if len(data) != 32 {
+-		t.Errorf("models count=%d want 32", len(data))
++	// 静态表 32 条，滤掉内部 subagent（browser_use_subagent / explore_sub_agent_v2 / summary）后 29。
++	if len(data) != 29 {
++		t.Errorf("models count=%d want 29", len(data))
+ 	}
+ 	found := false
+ 	for _, m := range data {
+-		if m.(map[string]any)["id"] == "glm-5.2" {
++		entry := m.(map[string]any)
++		if entry["id"] == "glm-5.2" {
+ 			found = true
++			if entry["context_window"] == nil || entry["context_window"].(float64) <= 0 {
++				t.Errorf("glm-5.2 context_window=%v want >0", entry["context_window"])
++			}
++			if entry["max_tokens"] == nil || entry["max_tokens"].(float64) <= 0 {
++				t.Errorf("glm-5.2 max_tokens=%v want >0", entry["max_tokens"])
++			}
++		}
++		if entry["id"] == "summary" || entry["id"] == "browser_use_subagent" {
++			t.Errorf("internal model %v should be filtered", entry["id"])
+ 		}
+ 	}
+ 	if !found {
+diff --git a/internal/upstream/client.go b/internal/upstream/client.go
+index 93581bd..622adfc 100644
+--- a/internal/upstream/client.go
++++ b/internal/upstream/client.go
+@@ -26,6 +26,7 @@ const (
+ 	ErrNotFound                   // 404 → 短冷却 60s 不累计 errCount
+ 	ErrServer                     // 5xx
+ 	ErrClient                     // 其他 4xx
++	ErrContextTooLong             // 4026/4022 上下文超限 → 请求级错误，不冷却账号
+ )
+ 
+ func (k ErrKind) String() string {
+@@ -42,6 +43,8 @@ func (k ErrKind) String() string {
+ 		return "server"
+ 	case ErrClient:
+ 		return "client"
++	case ErrContextTooLong:
++		return "context_too_long"
+ 	default:
+ 		return "none"
+ 	}
+@@ -262,10 +265,12 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
+ 
+ // ModelInfo 动态模型信息。
+ type ModelInfo struct {
+-	ID            string
+-	Name          string
+-	ContextWindow int64 // = maxInputTokens
+-	MaxTokens     int64 // = maxOutputTokens
++	ID              string
++	Name            string
++	ContextWindow   int64 // = maxInputTokens
++	MaxTokens       int64 // = maxOutputTokens（model_detail_list[0].max_tokens）
++	PromptMaxTokens int64 // 输入侧预算 = ctx − 输出预留（prompt_max_tokens）
++	MaxMode         bool  // display_config.max_mode：Trae Max 模式（1M 突破）标记
+ }
+ 
+ // FetchModels 拉 SOLO 模型表（get_detail_param，32 配置）。
+@@ -294,10 +299,20 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
+ 			ConfigName    string `json:"config_name"`
+ 			DisplayConfig struct {
+ 				DisplayName string `json:"display_name"`
++				MaxMode     bool   `json:"max_mode"`
+ 			} `json:"display_config"`
++			// model_detail_list[0] 里是明文真实参数：max_tokens（最大输出）、
++			// prompt_max_tokens（输入预算 = ctx − 输出预留）、max_turn 等。
++			// 2026-10-19 之前只解码了 model_name，这一层全丢了。
+ 			ModelDetailList []struct {
+-				ModelName string `json:"model_name"`
++				ModelName       string `json:"model_name"`
++				MaxTokens       int64  `json:"max_tokens"`
++				PromptMaxTokens int64  `json:"prompt_max_tokens"`
+ 			} `json:"model_detail_list"`
++			ContextWindowTokens struct {
++				Dev int64 `json:"dev"`
++				Max int64 `json:"max"`
++			} `json:"context_window_tokens"`
+ 		} `json:"config_info_list"`
+ 	}
+ 	if err := json.Unmarshal(data, &resp); err != nil {
+@@ -308,10 +323,20 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
+ 		if cfg.ConfigName == "" {
+ 			continue
+ 		}
+-		out = append(out, ModelInfo{
+-			ID:   cfg.ConfigName,
+-			Name: cfg.DisplayConfig.DisplayName,
+-		})
++		mi := ModelInfo{
++			ID:            cfg.ConfigName,
++			Name:          cfg.DisplayConfig.DisplayName,
++			ContextWindow: cfg.ContextWindowTokens.Dev,
++			MaxMode:       cfg.DisplayConfig.MaxMode,
++		}
++		if mi.ContextWindow <= 0 && cfg.ContextWindowTokens.Max > 0 {
++			mi.ContextWindow = cfg.ContextWindowTokens.Max
++		}
++		if len(cfg.ModelDetailList) > 0 {
++			mi.MaxTokens = cfg.ModelDetailList[0].MaxTokens
++			mi.PromptMaxTokens = cfg.ModelDetailList[0].PromptMaxTokens
++		}
++		out = append(out, mi)
+ 	}
+ 	if len(out) == 0 {
+ 		return nil, fmt.Errorf("models api returned empty list")
+diff --git a/internal/upstream/payload.go b/internal/upstream/payload.go
+index bc8bca0..18e64f6 100644
+--- a/internal/upstream/payload.go
++++ b/internal/upstream/payload.go
+@@ -91,6 +91,28 @@ func PrepareBody(src []byte) []byte {
+ 	obj["config_name"] = model
+ 	obj["model"] = model
+ 
++	// max_mode：OpenAI 侧扩展字段，对应 Trae IDE 的 Max 模式（1M 上下文突破）。
++	// 线上格式（逆向 ai_agent.dll / solo-lite 确认）：Max 开启时请求携带
++	// custom_model = 模型实体序列化——max_mode=true 是模式标记，
++	// context_window_size = 选择器选中的窗口值（selected_max_context_window_size，
++	// 即 UI 里 context_window_selector 的选择结果）；不开 Max 时 IDE 不发 custom_model。
++	if mm, ok := obj["max_mode"].(bool); ok {
++		delete(obj, "max_mode")
++		if mm {
++			obj["custom_model"] = map[string]any{
++				"config_name":            model,
++				"model_name":             model,
++				"config_source":          1, // ModelConfigSource.Trae
++				"is_preset":              false,
++				"use_remote_service":     true,
++				"encrypted_model_params": "",
++				"max_mode":               true,
++				"multimodal":             false,
++				"context_window_size":    1048576,
++			}
++		}
++	}
++
+ 	normalizeToolChoice(obj)
+ 	normalizeTools(obj)
+ 	out, err := json.Marshal(obj)
+diff --git a/internal/upstream/solosse.go b/internal/upstream/solosse.go
+index 0e6bce7..9732c73 100644
+--- a/internal/upstream/solosse.go
++++ b/internal/upstream/solosse.go
+@@ -56,7 +56,8 @@ func (e *SOLOStreamError) Error() string {
+ 	return fmt.Sprintf("solo error code=%d msg=%s", e.Code, e.Msg)
+ }
+ 
+-// Kind 将 SSE 流内错误分类。1005 / 4008 → ErrPlanLimit；4011 → ErrSoftRate；其余归 ErrClient。
++// Kind 将 SSE 流内错误分类。1005 / 4008 → ErrPlanLimit；4011 → ErrSoftRate；
++// 4026 / 4022 → ErrContextTooLong（请求超长，请求级错误，不该冷却账号）；其余归 ErrClient。
+ func (e *SOLOStreamError) Kind() ErrKind {
+ 	if e.Code == 1005 || e.Code == 4008 {
+ 		return ErrPlanLimit
+@@ -64,6 +65,9 @@ func (e *SOLOStreamError) Kind() ErrKind {
+ 	if e.Code == 4011 {
+ 		return ErrSoftRate
+ 	}
++	if e.Code == 4026 || e.Code == 4022 {
++		return ErrContextTooLong
++	}
+ 	return ErrClient
+ }
+ 
+@@ -141,6 +145,38 @@ func scanLine(st *sseState, line string) *SOLOEvent {
+ 	return nil
+ }
+ 
++// decorateUsage 把 SOLO token_usage 里的 Anthropic 风格缓存字段（顶层平铺的
++// cache_read_input_tokens / reasoning_tokens）转换成 OpenAI 客户端读取的
++// prompt_tokens_details.cached_tokens / completion_tokens_details.reasoning_tokens。
++// 不转换的话 OpenAI 兼容客户端（Codex / Cherry 等）永远显示不出缓存命中。
++// 2026-10-19 实测字段名；上游原始字段保留不动，便于排查。
++func decorateUsage(usage map[string]any) map[string]any {
++	if usage == nil {
++		return nil
++	}
++	cacheRead, _ := usage["cache_read_input_tokens"].(float64)
++	details, hasDetails := usage["prompt_tokens_details"].(map[string]any)
++	if !hasDetails {
++		details = map[string]any{}
++	}
++	if _, exists := details["cached_tokens"]; !exists {
++		details["cached_tokens"] = int64(cacheRead)
++	}
++	usage["prompt_tokens_details"] = details
++
++	if reasoning, _ := usage["reasoning_tokens"].(float64); reasoning > 0 {
++		outDetails, hasOut := usage["completion_tokens_details"].(map[string]any)
++		if !hasOut {
++			outDetails = map[string]any{}
++		}
++		if _, exists := outDetails["reasoning_tokens"]; !exists {
++			outDetails["reasoning_tokens"] = int64(reasoning)
++		}
++		usage["completion_tokens_details"] = outDetails
++	}
++	return usage
++}
++
+ // Aggregate 读取完整 SOLO SSE，聚合 response + reasoning + tool_calls + usage，
+ // 产出单个 OpenAI chat.completion（非流式）。
+ func Aggregate(r io.Reader) (map[string]any, error) {
+@@ -220,7 +256,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
+ 		},
+ 	}
+ 	if usage != nil {
+-		resp["usage"] = usage
++		resp["usage"] = decorateUsage(usage)
+ 	}
+ 	return resp, nil
+ }
+@@ -349,7 +385,7 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
+ 			choice["finish_reason"] = finish
+ 		}
+ 		if pendingUsage != nil {
+-			chunk["usage"] = pendingUsage
++			chunk["usage"] = decorateUsage(pendingUsage)
+ 			pendingUsage = nil
+ 		}
+ 		raw, _ := json.Marshal(chunk)

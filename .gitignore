@@ -15,3 +15,14 @@ coverage/
 reports/*.txt
 
 reports/*.json
+
+# 一次性探针脚本与本机构建产物
+dl.cjs
+dl2.cjs
+getgo.cjs
+probe.cjs
+probe2.cjs
+.tmp-go/
+.patchbuild/
+.patchverify/
+.tmp-*

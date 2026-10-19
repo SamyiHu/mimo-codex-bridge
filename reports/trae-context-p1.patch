@@ -1,0 +1,35 @@
+--- a/internal/upstream/client.go
++++ b/internal/upstream/client.go
+@@ -298,6 +298,9 @@
+ 			ModelDetailList []struct {
+ 				ModelName string `json:"model_name"`
+ 			} `json:"model_detail_list"`
++			ContextWindowTokens struct {
++				Dev int64 `json:"dev"`
++			} `json:"context_window_tokens"`
+ 		} `json:"config_info_list"`
+ 	}
+ 	if err := json.Unmarshal(data, &resp); err != nil {
+@@ -309,8 +312,9 @@
+ 			continue
+ 		}
+ 		out = append(out, ModelInfo{
+-			ID:   cfg.ConfigName,
+-			Name: cfg.DisplayConfig.DisplayName,
++			ID:            cfg.ConfigName,
++			Name:          cfg.DisplayConfig.DisplayName,
++			ContextWindow: cfg.ContextWindowTokens.Dev,
+ 		})
+ 	}
+ 	if len(out) == 0 {
+--- a/internal/server/handler.go
++++ b/internal/server/handler.go
+@@ -311,7 +311,7 @@
+ 				"owned_by":       "trae-solo",
+ 				"context_length": mi.ContextWindow,
+ 			}
+-			if entry["context_length"] == 0 {
++			if mi.ContextWindow <= 0 {
+ 				entry["context_length"] = 131072
+ 			}
+ 			out = append(out, entry)

@@ -1,0 +1,28 @@
+{
+ "0": [
+  {
+   "type": 1,
+   "defaultStatus": true,
+   "discount": "1",
+   "maxUseFlag": null,
+   "upgradeFee": "",
+   "isUnimodal": null
+  }
+ ],
+ "1": [
+  {
+   "type": 1,
+   "defaultStatus": true,
+   "discount": "1",
+   "maxUseFlag": null,
+   "upgradeFee": "",
+   "isUnimodal": null
+  }
+ ],
+ "2": [
+  {
+   "type": 1,
+   "defaultStatus": true
+  }
+ ]
+}

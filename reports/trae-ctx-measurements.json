@@ -1,0 +1,102 @@
+{
+ "Doubao-Seed-2.1-Turbo": {
+  "done": true,
+  "ctx": 0,
+  "evidence": "声明值即真实上限（×1.2 即 4026）",
+  "tpl": 37.55
+ },
+ "seed-code-pro-0430": {
+  "done": true,
+  "ctx": 460000,
+  "evidence": "阶梯过 287913、486109，其上失败",
+  "tpl": 37.55
+ },
+ "Doubao-Seed-2.1-Pro": {
+  "done": true,
+  "ctx": 500000,
+  "evidence": "阶梯过 316890、536826，其上失败",
+  "tpl": 37.55
+ },
+ "Doubao-Seed-Evolving": {
+  "done": true,
+  "ctx": 500000,
+  "evidence": "阶梯过 316890、536826，其上失败",
+  "tpl": 37.55
+ },
+ "Doubao-Seed-2.0-Code": {
+  "done": true,
+  "ctx": 0,
+  "evidence": "声明值即真实上限（×1.2 即 4026）",
+  "tpl": 37.55
+ },
+ "glm-5.3-flash": {
+  "done": true,
+  "ctx": 1000000,
+  "evidence": "1030486 tok 完整应答（行号验证正确）",
+  "tpl": 37.66
+ },
+ "glm-5.3-flashx": {
+  "done": true,
+  "ctx": 1000000,
+  "evidence": "1030486 tok 完整应答（行号验证正确）",
+  "tpl": 37.66
+ },
+ "glm-5.3": {
+  "done": true,
+  "ctx": 390000,
+  "evidence": "阶梯过 249226、417719，其上失败",
+  "tpl": 37.66
+ },
+ "glm-5.2": {
+  "done": true,
+  "ctx": 1000000,
+  "evidence": "1030486 tok 完整应答（行号验证正确）",
+  "tpl": 37.66
+ },
+ "glm-5-turbo": {
+  "done": true,
+  "ctx": 1000000,
+  "evidence": "1030486 tok 完整应答（行号验证正确）",
+  "tpl": 37.66
+ },
+ "glm-5": {
+  "done": true,
+  "ctx": 0,
+  "evidence": "声明值即真实上限（×1.2 即 4026）",
+  "tpl": 37.65
+ },
+ "DeepSeek-V4-Flash-Official": {
+  "done": true,
+  "verdict": "校准失败: HTTP 503 all accounts unavailable for work channel: no healthy account available for work channel"
+ },
+ "DeepSeek-V4-Flash": {
+  "done": true,
+  "ctx": 390000,
+  "evidence": "阶梯过 247464、413714，其上失败",
+  "tpl": 33.68
+ },
+ "DeepSeek-V4-Pro-Official": {
+  "done": true,
+  "ctx": 0,
+  "evidence": "B 探测异常: HTTP 400 unknown model \"DeepSeek-V4-Pro-Official\"，保持声明值",
+  "tpl": 33.73
+ },
+ "DeepSeek-V4-Pro": {
+  "done": true,
+  "ctx": 390000,
+  "evidence": "阶梯过 247464、413714，其上失败",
+  "tpl": 33.68
+ },
+ "kimi-k3": {
+  "done": true,
+  "ctx": 1000000,
+  "evidence": "1036640 tok 完整应答（行号验证正确）",
+  "tpl": 32.74
+ },
+ "kimi-k2.7-code": {
+  "done": true,
+  "ctx": 230000,
+  "evidence": "阶梯过 247719，其上失败",
+  "tpl": 32.68
+ }
+}
