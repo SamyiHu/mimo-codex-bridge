@@ -775,7 +775,9 @@ function makeBaseResponse(chatResponse, requestBody) {
     object: "response",
     created_at: chatResponse?.created ?? Math.floor(Date.now() / 1000),
     status: "completed",
-    model: chatResponse?.model ?? requestBody?.model ?? "",
+    // 上游有时把 model 回成空串（中转网关常见）：空串也要退回请求里的模型名，
+  // 否则 Codex 侧看到的模型是空的。
+  model: chatResponse?.model || requestBody?.model || "",
     output: [],
     parallel_tool_calls: requestBody?.parallel_tool_calls ?? true,
     tool_choice: requestBody?.tool_choice ?? "auto",

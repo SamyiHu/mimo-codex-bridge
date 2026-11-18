@@ -26,3 +26,11 @@ probe2.cjs
 .patchbuild/
 .patchverify/
 .tmp-*
+# 多上游运行态：本机配置，不入库（默认保持单上游）
+upstreams.json
+upstreams.disabled.json
+upstreams.local.json
+quota.json
+panel-history.json
+# 误把 %SystemDrive% 当路径产生的目录
+%SystemDrive%/

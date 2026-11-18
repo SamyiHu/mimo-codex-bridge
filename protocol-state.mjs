@@ -64,7 +64,7 @@ export class ResponseStore {
     this.sweep();
   }
 
-  put(id, response, controller = null) {
+  put(id, response, controller = null, meta = null) {
     if (!id) throw new TypeError("response id is required");
     this.cleanup();
     const previous = this.entries.get(id);
@@ -72,6 +72,9 @@ export class ResponseStore {
     this.entries.set(id, {
       response,
       controller: controller ?? previous?.controller ?? null,
+      // meta 不进 response：它记的是这条响应当初落在哪个上游，
+      // previous_response_id 续写必须回到同一家，否则上下文对不上。
+      meta: meta ?? previous?.meta ?? null,
       createdAt: previous?.createdAt ?? Date.now(),
       expiresAt: Date.now() + this.ttlMs,
     });
@@ -96,6 +99,12 @@ export class ResponseStore {
 
   record(id) {
     return this.take(id);
+  }
+
+  /** 只取路由元信息（upstreamId / model），不把响应本体交出去。 */
+  meta(id) {
+    const record = this.take(id);
+    return record?.meta ?? null;
   }
 
   patch(id, patch) {
@@ -129,6 +138,7 @@ export class ResponseStore {
         this.entries.set(item.id, {
           response: item.response,
           controller: null,
+          meta: item.meta ?? null,
           createdAt: Number(item.createdAt) || Date.now(),
           expiresAt: Number(item.expiresAt) || Date.now() + this.ttlMs,
         });
@@ -147,6 +157,7 @@ export class ResponseStore {
         .map(([id, record]) => ({
           id,
           response: record.response,
+          meta: record.meta ?? null,
           createdAt: record.createdAt,
           expiresAt: record.expiresAt,
         }));

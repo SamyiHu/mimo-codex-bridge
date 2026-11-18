@@ -18,6 +18,16 @@ const secretFile = path.join(DIR, "bridge-secret.txt");
 const workbuddyKeyFile = path.join(DIR, "workbuddy-api-key.txt");
 const tokenFile = path.join(DIR, "token.txt");
 const settingsFile = path.join(DIR, "panel-settings.json");
+const PANEL_STARTED_AT = Date.now();
+const UI_FILES = ["panel.mjs"];
+const historyFile = path.join(DIR, "panel-history.json");
+const registryFile = path.join(DIR, "upstreams.json");
+const registryLocalFile = path.join(DIR, "upstreams.local.json");
+const registryDisabledFile = path.join(DIR, "upstreams.disabled.json");
+const quotaFile = path.join(DIR, "quota.json");
+const HISTORY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const HISTORY_MAX = 4000;
+const HISTORY_MIN_GAP_MS = 5 * 60 * 1000;
 
 function loadSettings() {
   let saved = {};
@@ -43,6 +53,25 @@ function loadSettings() {
       saved.traeDir ||
       path.join(os.homedir(), ".trae2api"),
   };
+}
+
+function rememberUpstream(kind) {
+  if (!kind) return;
+  try {
+    const current = loadSettings();
+    const saved = JSON.parse(fs.existsSync(settingsFile) ? fs.readFileSync(settingsFile, "utf8") : "{}");
+    if (saved.lastUpstream === kind) return;
+    fs.writeFileSync(settingsFile, JSON.stringify({ ...saved, lastUpstream: kind, workbuddyUrl: current.workbuddyUrl, gatewayDir: current.gatewayDir, traeUrl: current.traeUrl, traeDir: current.traeDir }, null, 2), "utf8");
+  } catch {}
+}
+
+function loadLastUpstream() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+    return String(saved.lastUpstream || "");
+  } catch {
+    return "";
+  }
 }
 
 function saveSettings(patch) {
@@ -76,6 +105,162 @@ const TRAE_KEY_FILE = path.join(DIR, "trae-api-key.txt");
 let actionLock = Promise.resolve();
 let lastAction = { label: "", state: "idle", detail: "", at: "" };
 let actionBusy = false;
+
+/**
+ * 额度历史：每次刷新 /api/status 时看一眼，值变了或过了 5 分钟才落一个点。
+ * 只记 {t, id, share} 三个字段，7 天 / 4000 点封顶，文件很小。
+ */
+let historyCache = null;
+function loadHistory() {
+  if (historyCache) return historyCache;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(historyFile, "utf8"));
+    historyCache = Array.isArray(parsed?.samples) ? parsed.samples : [];
+  } catch {
+    historyCache = [];
+  }
+  return historyCache;
+}
+
+function saveHistory(samples) {
+  historyCache = samples;
+  try {
+    fs.writeFileSync(historyFile, JSON.stringify({ version: 1, samples }), "utf8");
+  } catch {}
+}
+
+function recordQuotaHistory(routing) {
+  const quota = routing?.quota || {};
+  const ids = Object.keys(quota);
+  if (!ids.length) return;
+  const now = Date.now();
+  const samples = loadHistory();
+  let changed = false;
+  for (const id of ids) {
+    const value = quota[id];
+    if (!value || value.share == null) continue;
+    let last = null;
+    for (let i = samples.length - 1; i >= 0; i -= 1) {
+      if (samples[i].id === id) {
+        last = samples[i];
+        break;
+      }
+    }
+    const due = !last || now - last.t >= HISTORY_MIN_GAP_MS;
+    const moved = !last || Math.abs(last.share - value.share) >= 0.01;
+    if (due || moved) {
+      samples.push({ t: now, id, share: Number(value.share) });
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  const cutoff = now - HISTORY_TTL_MS;
+  const kept = samples.filter((sample) => sample && sample.t >= cutoff && Number.isFinite(sample.share)).slice(-HISTORY_MAX);
+  saveHistory(kept);
+}
+
+/**
+ * 面板进程是不是在跑旧代码：拿自己的源码 mtime 和进程启动时间比。
+ * 改了 UI 却没重启面板时，界面会提示，而不是让人纳闷"为什么新按钮没反应"。
+ */
+function panelCodeMtime() {
+  let newest = 0;
+  for (const rel of UI_FILES) {
+    const target = path.join(DIR, rel);
+    try {
+      const stat = fs.statSync(target);
+      if (stat.isDirectory()) {
+        for (const entry of fs.readdirSync(target)) {
+          try {
+            newest = Math.max(newest, fs.statSync(path.join(target, entry)).mtimeMs);
+          } catch {}
+        }
+      } else {
+        newest = Math.max(newest, stat.mtimeMs);
+      }
+    } catch {}
+  }
+  return newest;
+}
+
+/** 原子写：先写 .tmp 再 rename，避免面板崩溃留下半截 JSON。 */
+function writeJsonAtomic(file, value) {
+  const temp = file + ".tmp-" + process.pid;
+  fs.writeFileSync(temp, JSON.stringify(value, null, 2) + "\n", "utf8");
+  try {
+    fs.renameSync(temp, file);
+  } catch {
+    fs.copyFileSync(temp, file);
+    fs.unlinkSync(temp);
+  }
+}
+
+function readJsonFile(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 面板这边只做"写文件 + 校验"：真正的启用/停用就是 upstreams.json 在不在。
+ * bridge 每 250ms 看一次 mtime，写完最多 0.25 秒就生效，不用重启。
+ */
+/**
+ * 上游实时余额：借两个插件已有的代理端点，避免在面板里重复实现网关鉴权。
+ * 只读余额（积分 / 账号数），失败就当没有，绝不影响页面。
+ */
+async function liveQuota() {
+  const out = {};
+  const grab = async (pluginPath, pick) => {
+    try {
+      const res = await fetch("http://127.0.0.1:" + PORT + pluginPath, { signal: AbortSignal.timeout(2500) });
+      if (!res.ok) return null;
+      return pick(await res.json());
+    } catch {
+      return null;
+    }
+  };
+  const wb = await grab("/api/plugins/workbuddy-credits/status", (payload) => {
+    const accounts = (payload && payload.status && payload.status.accounts) || [];
+    if (!accounts.length) return null;
+    const credits = accounts.reduce((n, a) => n + (Number(a.credits) || 0), 0);
+    return { credits, accounts: accounts.length, healthy: accounts.filter((a) => !a.cooling).length };
+  });
+  if (wb) out.wb = wb;
+  const trae = await grab("/api/plugins/trae-accounts/accounts", (payload) => {
+    const accounts = (payload && payload.accounts) || [];
+    if (!accounts.length) return null;
+    const credits = accounts.reduce((n, a) => n + (Number(a.credits) || 0), 0);
+    return { credits, accounts: accounts.length, healthy: accounts.filter((a) => a.enabled && !a.disabled).length };
+  });
+  if (trae) out.trae = trae;
+  return out;
+}
+
+async function routingState() {
+  const { parseRegistry } = await import("./upstream-registry.mjs");
+  const current = readJsonFile(registryFile);
+  const local = readJsonFile(registryLocalFile);
+  const parsed = current ? parseRegistry(current) : null;
+  return {
+    enabled: Boolean(current),
+    registry: current,
+    errors: parsed ? parsed.errors : [],
+    summary: parsed
+      ? { upstreams: [...parsed.upstreams.keys()], groups: [...parsed.groups.keys()] }
+      : { upstreams: [], groups: [] },
+    local,
+    quota: readJsonFile(quotaFile) || {},
+    files: {
+      registry: registryFile,
+      local: registryLocalFile,
+      disabled: registryDisabledFile,
+      quota: quotaFile,
+    },
+  };
+}
 
 function readText(file) {
   try {
@@ -379,6 +564,15 @@ async function collectStatus() {
     },
     codex: null,
     models: [],
+    modelDetails: [],
+    routing: null,
+    metrics: null,
+    liveQuota: {},
+    panel: {
+      startedAt: new Date(PANEL_STARTED_AT).toISOString(),
+      codeMtime: new Date(panelCodeMtime()).toISOString(),
+      stale: panelCodeMtime() > PANEL_STARTED_AT + 1000,
+    },
     lastAction,
     actionBusy,
     notes: [],
@@ -387,6 +581,7 @@ async function collectStatus() {
   try {
     const health = await fetchJson(`http://127.0.0.1:${BRIDGE_PORT}/health`);
     if (health.ok && health.payload) {
+      rememberUpstream(health.payload.upstreamKind || "");
       result.bridge = {
         online: true,
         upstreamKind: health.payload.upstreamKind || "",
@@ -396,6 +591,42 @@ async function collectStatus() {
         authMode: health.payload.authMode || "",
         protocols: health.payload.protocols || null,
       };
+      result.routing = null;
+      if (bridgeSecret) {
+        try {
+          const status = await fetchJson(
+            `http://127.0.0.1:${BRIDGE_PORT}/status`,
+            { headers: { Authorization: `Bearer ${bridgeSecret}` } },
+          );
+          if (status.ok && status.payload?.routing) {
+            result.routing = status.payload.routing;
+          }
+          if (status.ok && status.payload) {
+            // 旧版 bridge 的 /status 里没有 routing 字段：界面据此提示"重启 bridge"
+            result.bridge.routingSupported = Boolean(status.payload.routing);
+            result.bridge.version = status.payload.version || "";
+            if (status.payload.pid) result.bridge.pid = status.payload.pid;
+          }
+          if (status.ok && status.payload?.metrics) {
+            result.metrics = status.payload.metrics;
+          }
+          if (status.ok && status.payload?.routing?.enabled) {
+            try {
+              result.liveQuota = await liveQuota();
+            } catch {
+              result.liveQuota = {};
+            }
+            try {
+              recordQuotaHistory(status.payload.routing);
+            } catch (error) {
+              result.notes.push("额度历史写入失败：" + String(error && error.message ? error.message : error));
+            }
+          }
+        } catch {
+          result.notes.push("读取 /status 失败");
+        }
+      }
+
       if (bridgeSecret) {
         try {
           const models = await fetchJson(
@@ -404,6 +635,8 @@ async function collectStatus() {
           );
           if (models.ok && Array.isArray(models.payload?.data)) {
             result.models = models.payload.data.map((m) => m.id).filter(Boolean);
+            // 原始对象留着：模型页点开要能看到上游到底给了什么字段
+            result.modelDetails = models.payload.data.slice(0, 400);
           }
         } catch {
           result.notes.push("读取 /v1/models 失败");
@@ -581,7 +814,13 @@ async function bridgeAction(action) {
     }
     if (action === "start" || action === "restart") {
       const current = await collectStatus();
-      const upstream = current.bridge.upstreamKind || "mimo";
+      // bridge 离线时 collectStatus 拿不到 upstreamKind：回退到上次成功记住的那家，
+      // 再退到面板配置里唯一配置了地址的那家，最后才是 mimo。
+      const upstream =
+        current.bridge.upstreamKind ||
+        loadLastUpstream() ||
+        (fs.existsSync(TRAE_EXE) ? "trae" : "") ||
+        "workbuddy";
       const args = ["-Port", String(BRIDGE_PORT), "-Upstream", upstream];
       if (upstream === "workbuddy") {
         args.push("-UpstreamUrl", WORKBUDDY_URL);
@@ -601,812 +840,37 @@ async function bridgeAction(action) {
   });
 }
 
+const UI_DIR = path.join(DIR, "panel-ui");
+const uiCache = new Map();
+
+/** 读面板静态资源，按 mtime 缓存：改完 CSS 刷新页面就生效，不用重启面板。 */
+function readUi(name) {
+  const file = path.join(UI_DIR, name);
+  try {
+    const stat = fs.statSync(file);
+    const cached = uiCache.get(file);
+    if (cached && cached.mtimeMs === stat.mtimeMs) return cached.text;
+    const text = fs.readFileSync(file, "utf8");
+    uiCache.set(file, { mtimeMs: stat.mtimeMs, text });
+    return text;
+  } catch (error) {
+    console.error("[panel] 读不到 " + file + "：" + String(error && error.message ? error.message : error));
+    return "";
+  }
+}
+
 function buildHtml(pluginCards) {
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>模型桥控制面板</title>
-<style>
-  :root {
-    --bg: #0b1220;
-    --panel: #121a2b;
-    --panel-2: #1a2438;
-    --line: #2a3a55;
-    --ink: #eef3fb;
-    --muted: #93a4bf;
-    --ok: #34d399;
-    --warn: #fbbf24;
-    --err: #f87171;
-    --accent: #2dd4bf;
-    --accent-2: #38bdf8;
-    --accent-ink: #042f2e;
+  const shell = readUi("shell.html");
+  if (!shell) {
+    return "<!doctype html><meta charset=\"utf-8\"><pre>panel-ui 缺失：找不到 panel-ui/shell.html</pre>";
   }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
-  body {
-    min-height: 100vh;
-    font: 15px/1.55 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-    background: var(--bg);
-    color: var(--ink);
-    -webkit-font-smoothing: antialiased;
-  }
-  .wrap { max-width: 820px; margin: 0 auto; padding: 22px 16px 40px; }
-
-  header {
-    display: flex; justify-content: space-between; align-items: center;
-    gap: 12px; margin-bottom: 16px;
-  }
-  h1 { margin: 0; font-size: 22px; font-weight: 700; }
-  .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
-
-  /* 大按钮：整块可点，热区 ≥ 48px */
-  .btn {
-    appearance: none;
-    border: 1px solid var(--line);
-    background: var(--panel-2);
-    color: var(--ink);
-    border-radius: 12px;
-    min-height: 48px;
-    padding: 12px 18px;
-    cursor: pointer;
-    font: inherit;
-    font-weight: 600;
-    user-select: none;
-    touch-action: manipulation;
-    transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
-  }
-  .btn:hover { border-color: var(--accent); background: #1f2c44; }
-  .btn:active { transform: scale(0.98); }
-  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .btn:disabled {
-    opacity: 0.55; cursor: not-allowed; transform: none;
-  }
-  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-  .btn.primary:hover { background: #5eead4; }
-  .btn.danger:hover { border-color: var(--err); color: var(--err); background: rgba(248,113,113,0.08); }
-
-  .grid { display: grid; gap: 14px; }
-  .card {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 16px;
-    padding: 16px;
-  }
-  .card h2 {
-    margin: 0 0 12px;
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--muted);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-  }
-
-  /* 上游切换：两个大块，整块可点 */
-  .switches {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 12px;
-  }
-  @media (max-width: 640px) {
-    .switches { grid-template-columns: 1fr; }
-  }
-  .switch {
-    display: block;
-    width: 100%;
-    text-align: left;
-    border: 2px solid var(--line);
-    border-radius: 14px;
-    background: var(--panel-2);
-    color: inherit;
-    font: inherit;
-    padding: 16px;
-    cursor: pointer;
-    user-select: none;
-    touch-action: manipulation;
-    transition: border-color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
-    min-height: 132px;
-  }
-  .switch:hover { border-color: var(--accent); background: #1f2c44; }
-  .switch:active { transform: scale(0.99); }
-  .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .switch:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
-  .switch.active {
-    border-color: var(--accent);
-    background: rgba(45, 212, 191, 0.1);
-    box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.18);
-  }
-  .switch .title {
-    font-size: 17px;
-    font-weight: 700;
-    margin-bottom: 6px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .switch .desc {
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 1.45;
-    min-height: 40px;
-  }
-  .switch .cta {
-    margin-top: 12px;
-    font-size: 13px;
-    font-weight: 700;
-    color: var(--accent);
-    letter-spacing: 0.02em;
-  }
-  .switch.active .cta { color: var(--ok); }
-  .cta.busy-text { color: var(--accent); animation: pulse 1.1s ease-in-out infinite; }
-  @keyframes pulse { 50% { opacity: 0.55; } }
-
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 3px 10px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 600;
-    border: 1px solid var(--line);
-    color: var(--muted);
-  }
-  .badge.on {
-    color: var(--ok);
-    border-color: rgba(52, 211, 153, 0.4);
-    background: rgba(52, 211, 153, 0.1);
-  }
-
-  .dot {
-    display: inline-block;
-    width: 9px; height: 9px;
-    border-radius: 50%;
-    background: var(--muted);
-    flex: none;
-  }
-  .dot.ok { background: var(--ok); box-shadow: 0 0 0 3px rgba(52,211,153,0.18); }
-  .dot.warn { background: var(--warn); box-shadow: 0 0 0 3px rgba(251,191,36,0.18); }
-  .dot.err { background: var(--err); box-shadow: 0 0 0 3px rgba(248,113,113,0.18); }
-
-  /* 操作行：按钮固定高度，避免刷新时抖动 */
-  .actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-top: 14px;
-  }
-  .actions .btn { min-width: 120px; }
-
-  /* 状态行：仅主状态卡固定最小高度防跳版；插件卡的 .rows 随内容收缩 */
-  #statusBody { min-height: 220px; }
-
-  /* ── 插件卡片视觉（只作用于插件容器，不影响主面板）── */
-  /* 实体行（含操作按钮的账号行）做成内嵌小卡，与摘要表格行形成层级 */
-  #wbc-pool .row:has(.wbc-act),
-  #wtr-accounts .row:has(.wtr-act) {
-    background: var(--panel-2);
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 10px 14px;
-    margin: 8px 0 0;
-    flex-wrap: wrap;
-    row-gap: 6px;
-    transition: border-color 0.15s;
-  }
-  #wbc-pool .row:has(.wbc-act):hover,
-  #wtr-accounts .row:has(.wtr-act):hover { border-color: rgba(45, 212, 191, 0.45); }
-  #wbc-pool .row:has(.wbc-act) .k,
-  #wtr-accounts .row:has(.wtr-act) .k {
-    color: var(--ink);
-    font-weight: 600;
-    font-size: 13px;
-  }
-
-  /* 行内操作胶囊：蓝=查看/编辑，琥珀=启停，绿=复活，红=删除 */
-  .wtr-act, .wbc-act {
-    cursor: pointer;
-    user-select: none;
-    display: inline-block;
-    padding: 1px 10px;
-    margin-left: 6px;
-    border: 1px solid rgba(56, 189, 248, 0.35);
-    border-radius: 999px;
-    color: var(--accent-2);
-    background: rgba(56, 189, 248, 0.06);
-    font-size: 12px;
-    line-height: 18px;
-    transition: border-color 0.15s, color 0.15s, background 0.15s;
-  }
-  .wtr-act:hover, .wbc-act:hover {
-    border-color: var(--accent-2);
-    color: #bfe7ff;
-    background: rgba(56, 189, 248, 0.14);
-  }
-  .wtr-act[data-act^="delete"], .wbc-act[data-act^="delete"] {
-    color: var(--err); border-color: rgba(248, 113, 113, 0.35); background: rgba(248, 113, 113, 0.06);
-  }
-  .wtr-act[data-act^="delete"]:hover {
-    color: #ffc9c9; border-color: var(--err); background: rgba(248, 113, 113, 0.14);
-  }
-  .wtr-act[data-act^="toggle"], .wbc-act[data-act^="disable"], .wbc-act[data-act^="enable"] {
-    color: var(--warn); border-color: rgba(251, 191, 36, 0.35); background: rgba(251, 191, 36, 0.06);
-  }
-  .wtr-act[data-act^="toggle"]:hover, .wbc-act[data-act^="disable"]:hover, .wbc-act[data-act^="enable"]:hover {
-    color: #ffe9b8; border-color: var(--warn); background: rgba(251, 191, 36, 0.14);
-  }
-  .wbc-act[data-act^="revive"] {
-    color: var(--ok); border-color: rgba(52, 211, 153, 0.35); background: rgba(52, 211, 153, 0.06);
-  }
-  .wbc-act[data-act^="revive"]:hover {
-    color: #c6f7e5; border-color: var(--ok); background: rgba(52, 211, 153, 0.14);
-  }
-
-  /* 语义 chip：warn=琥珀，err=红（插件渲染时加修饰类） */
-  .chip.warn { color: var(--warn); border-color: rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.08); }
-  .chip.err { color: var(--err); border-color: rgba(248, 113, 113, 0.4); background: rgba(248, 113, 113, 0.08); }
-
-  /* 任务开关：迷你 switch（.toggle 由插件渲染，<i> 为滑块） */
-  #wbt-tasks .toggle {
-    display: inline-flex;
-    align-items: center;
-    width: 40px;
-    height: 20px;
-    padding: 0 3px;
-    border-radius: 999px;
-    background: rgba(148, 163, 184, 0.18);
-    border: 1px solid rgba(148, 163, 184, 0.4);
-    cursor: pointer;
-    user-select: none;
-    vertical-align: middle;
-    transition: background 0.15s, border-color 0.15s;
-  }
-  #wbt-tasks .toggle i {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: #94a3b8;
-    transition: transform 0.15s, background 0.15s;
-  }
-  #wbt-tasks .toggle.off i { transform: translateX(0); }
-  #wbt-tasks .toggle.on { background: rgba(45, 212, 191, 0.18); border-color: rgba(45, 212, 191, 0.55); }
-  #wbt-tasks .toggle.on i { transform: translateX(20px); background: var(--accent); }
-  #wbt-tasks .toggle:hover { border-color: var(--accent); }
-  /* 任务行：说明文字灰显，开关钉在行右缘成一条直线 */
-  #wbt-tasks .row .v {
-    display: inline-flex;
-    align-items: center;
-    gap: 12px;
-  }
-  #wbt-tasks .row .v .tsched { color: var(--muted); }
-  #wbt-tasks .row .v .toggle { flex: none; }
-  .row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    min-height: 40px;
-    padding: 6px 0;
-    border-top: 1px solid rgba(42, 58, 85, 0.55);
-  }
-  .row:first-child { border-top: 0; }
-  .k { color: var(--muted); flex: none; font-size: 13.5px; }
-  .v {
-    text-align: right;
-    font-family: Consolas, "Cascadia Mono", monospace;
-    font-size: 12.5px;
-    word-break: break-all;
-    line-height: 1.4;
-  }
-
-  .models {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    min-height: 48px;
-  }
-  .chip {
-    font-family: Consolas, "Cascadia Mono", monospace;
-    font-size: 12px;
-    padding: 6px 10px;
-    border-radius: 8px;
-    background: rgba(56, 189, 248, 0.1);
-    border: 1px solid rgba(56, 189, 248, 0.25);
-    color: var(--accent-2);
-    white-space: nowrap;
-  }
-  .empty { color: var(--muted); font-size: 13px; }
-
-  .form { display: grid; gap: 12px; }
-  .form label { display: grid; gap: 6px; }
-  .form label > span {
-    font-size: 12px;
-    color: var(--muted);
-    font-weight: 600;
-    letter-spacing: 0.04em;
-  }
-  .form input {
-    width: 100%;
-    min-height: 44px;
-    border-radius: 10px;
-    border: 1px solid var(--line);
-    background: var(--panel-2);
-    color: var(--ink);
-    padding: 10px 12px;
-    font: 13px/1.4 Consolas, "Cascadia Mono", monospace;
-  }
-  .form input:focus {
-    outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.15);
-  }
-  .form-actions { display: flex; flex-wrap: wrap; gap: 10px; }
-
-  /* 任务条：当前在干什么，一眼看到 */
-  .taskbar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-height: 48px;
-    padding: 10px 14px;
-    border-radius: 12px;
-    background: var(--panel-2);
-    border: 1px solid var(--line);
-    font-size: 13.5px;
-  }
-  .taskbar .state {
-    font-weight: 700;
-    flex: none;
-  }
-  .taskbar .state.running { color: var(--accent); }
-  .taskbar .state.ok { color: var(--ok); }
-  .taskbar .state.fail { color: var(--err); }
-  .taskbar .state.idle { color: var(--muted); }
-  .taskbar .detail { color: var(--muted); word-break: break-all; }
-  .spin {
-    width: 14px; height: 14px;
-    border: 2px solid rgba(45, 212, 191, 0.25);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    flex: none;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  footer {
-    margin-top: 16px;
-    color: var(--muted);
-    font-size: 12px;
-    line-height: 1.5;
-  }
-</style>
-</head>
-<body>
-  <div class="wrap">
-    <header>
-      <div>
-        <h1>模型桥控制面板</h1>
-        <div class="sub">点大卡片切换上游 · 按钮可整块点 · Codex 负责工具，推理走这里</div>
-      </div>
-      <button class="btn" id="refreshBtn" type="button">刷新状态</button>
-    </header>
-
-    <div class="grid">
-      <div class="taskbar" id="taskbar">
-        <div class="state idle" id="taskState">空闲</div>
-        <div class="detail" id="taskDetail">等待操作…</div>
-      </div>
-
-      <section class="card">
-        <h2>上游切换（点卡片即可）</h2>
-        <div class="switches">
-          <button class="switch" type="button" id="sw-mimo" data-upstream="mimo">
-            <div class="title">MiMo Desktop</div>
-            <div class="desc">用本机 MiMo 套餐驱动 Codex。需要 MiMo Desktop 已登录。</div>
-            <div class="badge" id="badge-mimo"><span class="dot"></span>未选中</div>
-            <div class="cta" id="cta-mimo">点击切换 →</div>
-          </button>
-          <button class="switch" type="button" id="sw-workbuddy" data-upstream="workbuddy">
-            <div class="title">WorkBuddy</div>
-            <div class="desc">走 workbuddy2api (:7863)。模型 ID 保留 cn: / global: 前缀。</div>
-            <div class="badge" id="badge-workbuddy"><span class="dot"></span>未选中</div>
-            <div class="cta" id="cta-workbuddy">点击切换 →</div>
-          </button>
-          <button class="switch" type="button" id="sw-trae" data-upstream="trae">
-            <div class="title">Trae（SOLO）</div>
-            <div class="desc">走 trae2api (:7864)。GLM / Doubao / DeepSeek 等，模型 ID 原样透传。</div>
-            <div class="badge" id="badge-trae"><span class="dot"></span>未选中</div>
-            <div class="cta" id="cta-trae">点击切换 →</div>
-          </button>
-        </div>
-
-        <div class="actions">
-          <button class="btn" type="button" id="gatewayBtn"><span class="btn-label">启动网关</span></button>
-          <button class="btn primary" type="button" id="startBtn"><span class="btn-label">启动 bridge</span></button>
-          <button class="btn" type="button" id="restartBtn"><span class="btn-label">重启</span></button>
-          <button class="btn danger" type="button" id="stopBtn"><span class="btn-label">停止</span></button>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>状态</h2>
-        <div class="rows" id="statusBody"><div class="empty">加载中…</div></div>
-      </section>
-
-      <section class="card">
-        <h2>WorkBuddy 配置</h2>
-        <div class="form">
-          <label>
-            <span>网关地址</span>
-            <input id="cfgUrl" type="text" spellcheck="false" placeholder="http://127.0.0.1:7863" />
-          </label>
-          <label>
-            <span>网关目录</span>
-            <input id="cfgDir" type="text" spellcheck="false" placeholder="C:\Users\你\.workbuddy2api" />
-          </label>
-          <label>
-            <span>API Key</span>
-            <input id="cfgKey" type="password" spellcheck="false" placeholder="workbuddy2api 的 api_key" />
-          </label>
-          <label>
-            <span>Trae 网关地址</span>
-            <input id="cfgTraeUrl" type="text" spellcheck="false" placeholder="http://127.0.0.1:7864" />
-          </label>
-          <label>
-            <span>Trae 网关目录</span>
-            <input id="cfgTraeDir" type="text" spellcheck="false" placeholder="C:\Users\你\.trae2api" />
-          </label>
-          <div class="form-actions">
-            <button class="btn primary" type="button" id="saveCfgBtn"><span class="btn-label">保存配置</span></button>
-            <button class="btn" type="button" id="reloadCfgBtn"><span class="btn-label">重新加载</span></button>
-          </div>
-          <div class="empty" id="cfgMeta">—</div>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>可用模型</h2>
-        <div class="models" id="modelsBody"><div class="empty">—</div></div>
-      </section>
-${pluginCards}
-    </div>
-
-    <footer>
-      只监听 127.0.0.1。切换上游会重启 bridge；模型仍由 cc-switch / Codex 配置选择。<br>
-      Anthropic 客户端（Claude Code）：<code>ANTHROPIC_BASE_URL=http://127.0.0.1:8788</code> ·
-      <code>ANTHROPIC_API_KEY=&lt;bridge-secret&gt;</code> · 模型用 <code>mimo-desktop/*</code>。<br>
-      WorkBuddy2API 离线 = workbuddy2api 网关未启动（WorkBuddy 客户端 ≠ API 网关）。
-    </footer>
-  </div>
-
-  <script>
-    const $ = (id) => document.getElementById(id);
-    let busy = false;
-    let refreshTimer = null;
-    let activeAction = null; // { kind, target }
-
-    function setText(el, text) {
-      if (el) el.textContent = text;
-    }
-    function setHTML(el, html) {
-      if (el) el.innerHTML = html;
-    }
-    function setClassName(el, name) {
-      if (el) el.className = name;
-    }
-
-    function setBusy(on, action) {
-      busy = on;
-      activeAction = on ? action : null;
-      for (const id of ["refreshBtn", "startBtn", "restartBtn", "stopBtn", "sw-mimo", "sw-workbuddy", "sw-trae", "gatewayBtn", "saveCfgBtn", "reloadCfgBtn"]) {
-        const el = $(id);
-        if (el) el.disabled = on;
-      }
-      // 只改卡片 CTA / 按钮 label，绝不动整块 DOM
-      for (const id of ["mimo", "workbuddy", "trae"]) {
-        const cta = $("cta-" + id);
-        if (!cta) continue;
-        if (on && action && action.kind === "switch" && action.target === id) {
-          setText(cta, "处理中…");
-          cta.classList.add("busy-text");
-        }
-      }
-      const btnLabels = {
-        start: "startBtn",
-        stop: "stopBtn",
-        restart: "restartBtn",
-        gateway: "gatewayBtn",
-        saveCfg: "saveCfgBtn",
-      };
-      const defaults = {
-        start: "启动 bridge",
-        stop: "停止",
-        restart: "重启",
-        gateway: "启动网关",
-        saveCfg: "保存配置",
-      };
-      for (const [key, id] of Object.entries(btnLabels)) {
-        const labelEl = $(id)?.querySelector(".btn-label");
-        if (!labelEl) continue;
-        if (on && action && action.target === key) {
-          setText(labelEl, "处理中…");
-        } else {
-          setText(labelEl, defaults[key]);
-        }
-      }
-    }
-
-    function renderTask(last) {
-      const stateEl = $("taskState");
-      const detailEl = $("taskDetail");
-      if (!stateEl || !detailEl) return;
-      const state = last?.state || "idle";
-      const label = last?.label || "空闲";
-      const detail = last?.detail || "等待操作…";
-      const at = last?.at ? last.at + " · " : "";
-      setClassName(stateEl, "state " + state);
-      setText(
-        stateEl,
-        state === "running" ? "进行中" : state === "ok" ? "完成" : state === "fail" ? "失败" : "空闲",
-      );
-      detailEl.innerHTML =
-        (state === "running" ? '<span class="spin"></span> ' : "") +
-        at + label + (detail ? " — " + detail : "");
-    }
-
-    function renderStatus(data) {
-      const b = data.bridge || {};
-      const w = data.workbuddy || {};
-      const t = data.trae || {};
-      const k = data.keys || {};
-      const c = data.codex || {};
-
-      const proto = b.protocols || {};
-      const protoParts = [];
-      if (proto.responses !== false) protoParts.push("Responses");
-      if (proto.chat_completions !== false) protoParts.push("Chat Completions");
-      if (proto.anthropic_messages) protoParts.push("Anthropic Messages");
-      if (proto.anthropic_count_tokens) protoParts.push("count_tokens");
-
-      const rows = [
-        ["Bridge", b.online ? '<span class="dot ok"></span>运行中' : '<span class="dot err"></span>未运行'],
-        ["当前上游", b.upstreamKind || "—"],
-        ["Chat 模式", b.chatMode || "—"],
-        ["入站协议", protoParts.length
-          ? protoParts.map((p) => '<span class="chip">' + p + "</span>").join(" ")
-          : (b.online ? "Responses · Chat Completions" : "—")],
-        ["Anthropic 端点", b.online
-          ? '<code>/v1/messages</code> · <code>x-api-key</code> = bridge-secret'
-          : "—"],
-        ["WorkBuddy2API", w.online
-          ? '<span class="dot ok"></span>在线' + (w.modelCount != null ? " · " + w.modelCount + " 个模型" : "")
-          : '<span class="dot err"></span>离线 · ' + (w.detail || "未运行或不可达")],
-        ["Trae2API", t.online
-          ? '<span class="dot ok"></span>在线' + (t.modelCount != null ? " · " + t.modelCount + " 个模型" : "")
-          : '<span class="dot err"></span>离线 · ' + (t.detail || "未运行或不可达")],
-        ["bridge-secret", k.bridgeSecret ? '<span class="dot ok"></span>已配置' : '<span class="dot err"></span>缺失'],
-        ["WorkBuddy key", k.workbuddyKey ? '<span class="dot ok"></span>已配置' : '<span class="dot warn"></span>缺失'],
-        ["Trae key", k.traeKey ? '<span class="dot ok"></span>已配置' : '<span class="dot warn"></span>缺失'],
-        ["Codex provider", (c.provider || "—") + (c.pointsToBridge ? ' <span class="badge on">已指向 bridge</span>' : "")],
-        ["Codex base_url", c.baseUrl || (c.missing ? "未找到 config.toml" : "—")],
-      ];
-      setHTML(
-        $("statusBody"),
-        rows.map(([kk, v]) =>
-          '<div class="row"><div class="k">' + kk + '</div><div class="v">' + v + "</div></div>"
-        ).join(""),
-      );
-
-      const active = b.upstreamKind || "";
-      for (const id of ["mimo", "workbuddy", "trae"]) {
-        const btn = $("sw-" + id);
-        const badge = $("badge-" + id);
-        const cta = $("cta-" + id);
-        if (!btn || !badge || !cta) continue;
-        const on = active === id;
-        btn.classList.toggle("active", on);
-        setClassName(badge, "badge" + (on ? " on" : ""));
-        setHTML(
-          badge,
-          on
-            ? '<span class="dot ok"></span>当前上游'
-            : '<span class="dot"></span>未选中',
-        );
-        // busy 时保留“处理中…”，空闲才显示切换/生效文案
-        const serverRunning = Boolean(data.actionBusy) || data.lastAction?.state === "running";
-        const serverSwitchTarget =
-          /切换到 (mimo|workbuddy|trae)/.exec(data.lastAction?.label || "")?.[1] || null;
-        if (!busy && !serverRunning) {
-          cta.classList.remove("busy-text");
-          setText(cta, on ? "当前生效中 ✓" : "点击切换 →");
-        } else {
-          const hit =
-            (busy && activeAction && activeAction.kind === "switch" && activeAction.target === id) ||
-            (!busy && serverRunning && serverSwitchTarget === id);
-          if (hit) {
-            setText(cta, "处理中…");
-            cta.classList.add("busy-text");
-          } else {
-            cta.classList.remove("busy-text");
-            setText(cta, on ? "当前生效中 ✓" : "点击切换 →");
-          }
-        }
-      }
-
-      const models = data.models || [];
-      setHTML(
-        $("modelsBody"),
-        models.length
-          ? models.map((id) => '<span class="chip">' + id + "</span>").join("")
-          : '<div class="empty">bridge 未返回模型。先启动 bridge，并确认上游在线。</div>',
-      );
-
-      // 本地 busy 时不被远端 lastAction 覆盖
-      if (!busy) renderTask(data.lastAction);
-    }
-
-    async function refresh() {
-      try {
-        const res = await fetch("/api/status", { cache: "no-store" });
-        const data = await res.json();
-        lastServerBusy = Boolean(data.actionBusy);
-        lastServerAction = data.lastAction || null;
-        renderStatus(data);
-      } catch (e) {
-        setHTML($("statusBody"), '<div class="empty">无法读取状态：' + e + "</div>");
-      }
-    }
-
-    async function post(url, body) {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body || {}),
-      });
-      return res.json();
-    }
-
-    // 发令后轮询完成态；请求本身立刻返回，界面不吊死
-    async function runAction(startLabel, fire) {
-      if (busy) return;
-      setBusy(true, fire.actionMeta);
-      renderTask({
-        state: "running",
-        label: startLabel,
-        detail: "已提交，等待 bridge 重启…",
-        at: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
-      });
-      clearInterval(refreshTimer);
-      refreshTimer = setInterval(refresh, 1000);
-
-      const startedAt = Date.now();
-      const TIMEOUT_MS = 60000;
-      try {
-        await fire.send();
-        // 轮询直到 actionBusy=false 且 lastAction 不再是 running
-        while (Date.now() - startedAt < TIMEOUT_MS) {
-          await new Promise((r) => setTimeout(r, 800));
-          await refresh();
-          const stillBusy = lastServerBusy || (lastServerAction && lastServerAction.state === "running");
-          if (!stillBusy && lastServerAction && lastServerAction.state !== "running") {
-            renderTask(lastServerAction);
-            break;
-          }
-        }
-        if (Date.now() - startedAt >= TIMEOUT_MS) {
-          renderTask({ state: "fail", label: startLabel, detail: "等待超时（60s），请手动刷新页面确认状态" });
-        }
-      } catch (e) {
-        renderTask({ state: "fail", label: startLabel, detail: String(e) });
-      } finally {
-        setBusy(false, null);
-        clearInterval(refreshTimer);
-        refreshTimer = setInterval(refresh, 8000);
-        refresh();
-      }
-    }
-
-    let lastServerBusy = false;
-    let lastServerAction = null;
-
-    function doSwitch(upstream) {
-      return runAction("切换到 " + upstream, {
-        actionMeta: { kind: "switch", target: upstream },
-        send: () =>
-          post("/api/switch", {
-            upstream,
-            chatMode: upstream === "workbuddy" ? "raw" : "compatible",
-          }),
-      });
-    }
-
-    function doBridge(action) {
-      const label = action === "start" ? "启动 bridge" : action === "stop" ? "停止 bridge" : "重启 bridge";
-      return runAction(label, {
-        actionMeta: { kind: "bridge", target: action },
-        send: () => post("/api/bridge", { action }),
-      });
-    }
-
-    function doGateway() {
-      return runAction("启动网关（workbuddy + trae）", {
-        actionMeta: { kind: "gateway", target: "gateway" },
-        send: () => post("/api/gateway", {}),
-      });
-    }
-
-    async function loadConfig() {
-      try {
-        const res = await fetch("/api/config", { cache: "no-store" });
-        const data = await res.json();
-        $("cfgUrl").value = data.workbuddyUrl || "";
-        $("cfgDir").value = data.gatewayDir || "";
-        $("cfgKey").value = data.apiKey || "";
-        $("cfgTraeUrl").value = data.traeUrl || "";
-        $("cfgTraeDir").value = data.traeDir || "";
-        const bits = [];
-        bits.push(data.gatewayExeExists ? "网关可执行文件：已找到" : "网关可执行文件：缺失");
-        bits.push(data.apiKeySet ? "API Key：已配置" : "API Key：未配置");
-        if (data.gatewayApiKey) {
-          bits.push(data.gatewayApiKeyMatch ? "与网关 config.json 一致" : "与网关 config.json 不一致");
-        }
-        bits.push(data.bridgeSecretSet ? "bridge-secret：已配置" : "bridge-secret：缺失");
-        bits.push("trae2api：" + (data.traeDir || "默认 ~/.trae2api"));
-        $("cfgMeta").textContent = bits.join(" · ");
-      } catch (e) {
-        $("cfgMeta").textContent = "读取配置失败：" + e;
-      }
-    }
-
-    async function saveConfig() {
-      if (busy) return;
-      setBusy(true, { kind: "config", target: "saveCfg" });
-      try {
-        const res = await fetch("/api/config", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            workbuddyUrl: $("cfgUrl").value.trim(),
-            gatewayDir: $("cfgDir").value.trim(),
-            apiKey: $("cfgKey").value.trim(),
-            traeUrl: $("cfgTraeUrl").value.trim(),
-            traeDir: $("cfgTraeDir").value.trim(),
-          }),
-        });
-        const data = await res.json();
-        if (data.ok) {
-          renderTask({ state: "ok", label: "保存 WorkBuddy 配置", detail: "已写入" });
-        } else {
-          renderTask({ state: "fail", label: "保存 WorkBuddy 配置", detail: data.error || "失败" });
-        }
-      } catch (e) {
-        renderTask({ state: "fail", label: "保存 WorkBuddy 配置", detail: String(e) });
-      } finally {
-        setBusy(false, null);
-        await loadConfig();
-        await refresh();
-      }
-    }
-
-    $("sw-mimo").addEventListener("click", () => doSwitch("mimo"));
-    $("sw-workbuddy").addEventListener("click", () => doSwitch("workbuddy"));
-    $("sw-trae").addEventListener("click", () => doSwitch("trae"));
-    $("startBtn").addEventListener("click", () => doBridge("start"));
-    $("stopBtn").addEventListener("click", () => doBridge("stop"));
-    $("restartBtn").addEventListener("click", () => doBridge("restart"));
-    $("gatewayBtn").addEventListener("click", () => doGateway());
-    $("saveCfgBtn").addEventListener("click", () => saveConfig());
-    $("reloadCfgBtn").addEventListener("click", () => loadConfig());
-    $("refreshBtn").addEventListener("click", refresh);
-
-    refresh();
-    loadConfig();
-    refreshTimer = setInterval(refresh, 8000);
-  </script>
-</body>
-</html>
-`;
+  return shell
+    .replace("{{CSS}}", () => readUi("app.css"))
+    .replace("{{JS}}", () => readUi("app.js"))
+    .replace("{{PLUGIN_CARDS}}", () => pluginCards)
+    .replace(/\{\{VERSION\}\}/g, () => "2.9")
+    .replace(/\{\{BRIDGE_PORT\}\}/g, () => String(BRIDGE_PORT))
+    .replace(/\{\{PANEL_PORT\}\}/g, () => String(PORT));
 }
 
 let HTML = "";
@@ -1478,8 +942,92 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
     await htmlReady;
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(HTML);
+    // 每次请求重建页面：panel-ui 里的三个文件按 mtime 缓存读取，
+    // 所以改完 CSS/JS 刷新一下浏览器就生效，不用重启面板。
+    const page = buildHtml(pluginCards.join("\n")) || HTML;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(page);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/routing") {
+    const state = await routingState();
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(JSON.stringify(state));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/routing") {
+    const raw = await readBody(req);
+    try {
+      const draft = typeof raw === "string" ? JSON.parse(raw) : raw;
+      const { parseRegistry } = await import("./upstream-registry.mjs");
+      const parsed = parseRegistry(draft);
+      if (parsed.errors.length) {
+        return json(res, 400, { ok: false, errors: parsed.errors });
+      }
+      writeJsonAtomic(registryFile, draft);
+      return json(res, 200, { ok: true, errors: [], note: "已写入 upstreams.json，bridge 会在 250ms 内热加载" });
+    } catch (error) {
+      return json(res, 400, { ok: false, errors: [String(error && error.message ? error.message : error)] });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/routing/enable") {
+    try {
+      // 已经有 upstreams.json 就只是"再确认一次"，别用模板盖掉用户刚保存的配置
+      if (fs.existsSync(registryFile)) {
+        return json(res, 200, { ok: true, note: "已经是启用状态" });
+      }
+      let draft = readJsonFile(registryLocalFile);
+      if (!draft) draft = readJsonFile(registryDisabledFile);
+      if (!draft) {
+        return json(res, 400, { ok: false, error: "没有 upstreams.local.json，先在路由页填一份" });
+      }
+      const { parseRegistry } = await import("./upstream-registry.mjs");
+      const parsed = parseRegistry(draft);
+      if (parsed.errors.length) return json(res, 400, { ok: false, errors: parsed.errors });
+      writeJsonAtomic(registryFile, draft);
+      return json(res, 200, { ok: true, note: "已启用，bridge 250ms 内热加载" });
+    } catch (error) {
+      return json(res, 500, { ok: false, error: String(error) });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/routing/disable") {
+    try {
+      if (fs.existsSync(registryFile)) {
+        fs.renameSync(registryFile, registryDisabledFile);
+      }
+      return json(res, 200, { ok: true, note: "已停用，upstreams.json 已改名为 upstreams.disabled.json" });
+    } catch (error) {
+      return json(res, 500, { ok: false, error: String(error) });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/quota") {
+    const raw = await readBody(req);
+    try {
+      const draft = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (!draft || typeof draft !== "object" || Array.isArray(draft)) {
+        return json(res, 400, { ok: false, error: "quota.json 必须是对象" });
+      }
+      writeJsonAtomic(quotaFile, draft);
+      return json(res, 200, { ok: true });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error) });
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/quota/live") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(JSON.stringify(await liveQuota()));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/history") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ ok: true, samples: loadHistory() }));
     return;
   }
 

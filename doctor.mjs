@@ -153,6 +153,48 @@ if (bridgeSecret) {
   check("bridge_status_auth", false, "bridge-secret.txt not found");
 }
 
+// ── 多上游注册表（可选）：没有 upstreams.json 就是单上游模式，不算失败 ──
+const registryPath =
+  process.env.MIMO_BRIDGE_UPSTREAMS || path.join(projectDir, "upstreams.json");
+if (!fs.existsSync(registryPath)) {
+  check(
+    "upstream_registry",
+    true,
+    "未启用（可选）：没有 upstreams.json，按单上游模式运行",
+    false,
+  );
+} else {
+  try {
+    const { parseRegistry } = await import("./upstream-registry.mjs");
+    const parsed = parseRegistry(JSON.parse(fs.readFileSync(registryPath, "utf8")));
+    const missingTokens = [...parsed.upstreams.values()]
+      .filter((upstream) => !fs.existsSync(path.join(projectDir, upstream.tokenFile)))
+      .map((upstream) => upstream.id);
+    const problems = [...parsed.errors];
+    if (missingTokens.length) problems.push("缺 token 文件：" + missingTokens.join("、"));
+    check(
+      "upstream_registry",
+      problems.length === 0,
+      problems.length
+        ? problems.join("；")
+        : parsed.upstreams.size + " 家上游 / " + parsed.groups.size + " 个路由组",
+      false,
+    );
+  } catch (error) {
+    check("upstream_registry", false, "读 upstreams.json 失败：" + error.message, false);
+  }
+}
+
+const quotaPath = path.join(projectDir, "quota.json");
+check(
+  "quota_ledger",
+  fs.existsSync(quotaPath),
+  fs.existsSync(quotaPath)
+    ? "有 quota.json：额度账本会读它（60 秒 TTL）"
+    : "没有 quota.json：额度一律视为未知，不影响可用性",
+  false,
+);
+
 let availableModels = [];
 if (status?.engine && upstreamToken) {
   try {

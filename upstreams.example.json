@@ -1,0 +1,63 @@
+{
+  "$schema_note": "复制成 upstreams.json；面板将来负责编辑它。mimo 的 base 留空 = 靠端口扫描发现。",
+  "upstreams": [
+    {
+      "id": "mimo",
+      "kind": "mimo",
+      "base": "",
+      "tokenFile": "token.txt",
+      "capabilities": {
+        "needsDiscovery": true,
+        "modelPrefix": "mimo-desktop",
+        "reasoningEffort": "normalize",
+        "thinkingBudget": "map",
+        "fallbackModel": "mimo-desktop/mimo-v2.6-pro"
+      }
+    },
+    {
+      "id": "wb",
+      "kind": "openai",
+      "base": "http://127.0.0.1:7863",
+      "tokenFile": "workbuddy-api-key.txt",
+      "capabilities": {
+        "chatMode": "raw",
+        "modelPassthrough": true,
+        "toolCallGuard": true
+      }
+    },
+    {
+      "id": "trae",
+      "kind": "openai",
+      "base": "http://127.0.0.1:7864",
+      "tokenFile": "trae-api-key.txt",
+      "capabilities": {
+        "chatMode": "raw",
+        "modelPassthrough": true,
+        "enrichModels": "trae"
+      }
+    }
+  ],
+  "groups": [
+    {
+      "id": "daily",
+      "models": [
+        "wb/cn:glm-4.6",
+        "trae/glm-4.6",
+        "mimo/mimo-desktop/mimo-v2.6-pro"
+      ],
+      "routing": "smart",
+      "stays": "auto",
+      "listed": true
+    },
+    {
+      "id": "cheap",
+      "models": [
+        "trae/glm-4.6",
+        "wb/cn:glm-4-flash"
+      ],
+      "routing": "usage",
+      "stays": "off",
+      "listed": true
+    }
+  ]
+}

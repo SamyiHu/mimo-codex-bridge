@@ -1,0 +1,12 @@
+{
+  "_note": "复制成 quota.json。bridge 与面板都读它（60 秒 TTL）；不知道就别写这一条，别写 0。",
+  "wb": {
+    "share": 0.42,
+    "resetsAt": 1790000000000
+  },
+  "trae": {
+    "used": 30,
+    "limit": 100,
+    "resetsAt": 1790000000000
+  }
+}

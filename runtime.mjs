@@ -51,10 +51,16 @@ export class MetricsRegistry {
     maxConcurrent = 8,
     breakerFailures = 3,
     breakerCooldownMs = 5000,
+    maxRequests = 200,
   } = {}) {
     this.maxConcurrent = maxConcurrent;
+    // 最近请求的环形缓冲：面板"请求"页读它。只留元信息，不留 prompt 内容。
+    this.maxRequests = maxRequests;
+    this.requests = [];
+    this.requestSeq = 0;
     this.startedAt = Date.now();
     this.active = 0;
+    this.activeSlots = new Set();
     this.total = 0;
     this.statusCounts = new Map();
     this.modelCounts = new Map();
@@ -94,11 +100,25 @@ export class MetricsRegistry {
     this.total += 1;
   }
 
-  tryBegin({ countTotal = true } = {}) {
+  tryBegin({ countTotal = true, requestId = "", path = "" } = {}) {
     if (this.active >= this.maxConcurrent) return null;
     this.active += 1;
     if (countTotal) this.total += 1;
-    return { startedAt: Date.now(), model: null };
+    this.requestSeq += 1;
+    const state = {
+      id: this.requestSeq,
+      startedAt: Date.now(),
+      model: null,
+      requestId: String(requestId || ""),
+      path: String(path || ""),
+      upstream: null,
+      stream: false,
+      usage: null,
+      error: null,
+      finished: false,
+    };
+    this.activeSlots.add(state);
+    return state;
   }
 
   setModel(state, model) {
@@ -109,12 +129,52 @@ export class MetricsRegistry {
   observeFirstToken(state, elapsedMs) {
     if (!state || state.firstTokenObserved) return;
     state.firstTokenObserved = true;
+    state.firstTokenMs = Math.max(0, Math.round(elapsedMs));
     this.firstTokenLatencies.push(Math.max(0, elapsedMs));
     if (this.firstTokenLatencies.length > 1000) this.firstTokenLatencies.shift();
   }
 
-  finish(state, statusCode = 0) {
+  /** 这一跳走的是哪家上游（多上游模式才有）。 */
+  setUpstream(state, upstreamId) {
+    if (!state || !upstreamId) return;
+    state.upstream = String(upstreamId);
+  }
+
+  setClient(state, client) {
+    if (!state || !client) return;
+    state.client = String(client).slice(0, 40);
+  }
+
+  setStream(state, streaming) {
     if (!state) return;
+    state.stream = Boolean(streaming);
+  }
+
+  noteUsage(state, usage) {
+    if (!state || !usage || typeof usage !== "object") return;
+    state.usage = {
+      input: Number(usage.prompt_tokens ?? usage.input_tokens) || 0,
+      output: Number(usage.completion_tokens ?? usage.output_tokens) || 0,
+      total: Number(usage.total_tokens) || 0,
+      estimated: Boolean(usage.__estimated),
+    };
+  }
+
+  noteError(state, message) {
+    if (!state || !message) return;
+    state.error = String(message).slice(0, 200);
+  }
+
+  /** 最近 N 条请求，新的在前。 */
+  recent(limit = 50) {
+    const n = Math.max(1, Math.min(Number(limit) || 50, this.requests.length));
+    return this.requests.slice(-n).reverse();
+  }
+
+  finish(state, statusCode = 0) {
+    if (!state || state.finished) return;
+    state.finished = true;
+    this.activeSlots.delete(state);
     this.active = Math.max(0, this.active - 1);
     const status = String(statusCode || 0);
     this.statusCounts.set(status, (this.statusCounts.get(status) || 0) + 1);
@@ -129,6 +189,27 @@ export class MetricsRegistry {
     const latency = Math.max(0, Date.now() - state.startedAt);
     this.latencies.push(latency);
     if (this.latencies.length > 1000) this.latencies.shift();
+
+    const usage = state.usage || {};
+    this.requests.push({
+      id: state.id,
+      at: new Date(state.startedAt).toISOString(),
+      started_at: state.startedAt,
+      ms: latency,
+      first_token_ms: state.firstTokenMs ?? null,
+      path: state.path,
+      client: state.client || "",
+      model: state.model,
+      upstream: state.upstream,
+      status: Number(statusCode) || 0,
+      stream: Boolean(state.stream),
+      input_tokens: usage.input || 0,
+      output_tokens: usage.output || 0,
+      total_tokens: usage.total || 0,
+      estimated: Boolean(usage.estimated),
+      error: state.error,
+    });
+    if (this.requests.length > this.maxRequests) this.requests.shift();
   }
 
   observeError(type) {
@@ -145,6 +226,39 @@ export class MetricsRegistry {
 
   observeRetry() {
     this.retries += 1;
+  }
+
+  activeDetails() {
+    const now = Date.now();
+    return [...this.activeSlots].map((state) => ({
+      requestId: state.requestId,
+      path: state.path,
+      client: state.client || "",
+      model: state.model,
+      age_ms: now - state.startedAt,
+    }));
+  }
+
+  /**
+   * 强制回收持有时间超过 maxAgeMs 的并发额度。
+   * 上游 fetch 均有超时兜底，但额度仍可能因未知路径泄漏；不回收的话
+   * maxConcurrent 会被永久占满，新请求全部 429。
+   */
+  reapStale(maxAgeMs) {
+    const now = Date.now();
+    const reaped = [];
+    for (const state of [...this.activeSlots]) {
+      const age = now - state.startedAt;
+      if (age < maxAgeMs) continue;
+      this.finish(state, 599);
+      reaped.push({
+        requestId: state.requestId,
+        path: state.path,
+        model: state.model,
+        age_ms: age,
+      });
+    }
+    return reaped;
   }
 
   observeEngineDiscovery(changed = false) {
@@ -194,9 +308,12 @@ export class MetricsRegistry {
         total: this.total,
         active: this.active,
         max_concurrent: this.maxConcurrent,
+        active_details: this.activeDetails(),
         by_status: this.objectMap(this.statusCounts),
         by_model: this.objectMap(this.modelCounts),
         by_error: this.objectMap(this.errorCounts),
+        kept: this.requests.length,
+        recent: this.recent(80),
       },
       latency: {
         request: this.latencySummary(this.latencies),

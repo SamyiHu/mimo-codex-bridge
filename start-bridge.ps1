@@ -25,6 +25,12 @@ if (-not (Test-Path -LiteralPath $entry)) {
     throw "找不到 bridge.mjs：$entry"
 }
 
+# 桥侧并发上限对齐上游容量：workbuddy 3 账号 × 单账号 8 并发 = 24。
+# 仅在未显式设置环境变量时生效。
+if (-not $env:MIMO_BRIDGE_MAX_CONCURRENT) {
+    $env:MIMO_BRIDGE_MAX_CONCURRENT = "24"
+}
+
 function Get-ProcessRecord([int]$ProcessId) {
     return Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
 }

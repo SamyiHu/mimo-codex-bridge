@@ -1,3 +1,4 @@
+import "./isolate.mjs";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { spawn } from "node:child_process";

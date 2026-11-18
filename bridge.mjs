@@ -14,6 +14,7 @@ import os from "node:os";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { promisify } from "node:util";
 import {
   CircuitBreaker,
@@ -38,6 +39,8 @@ import {
   anthropicSseWrite,
 } from "./anthropic-messages.mjs";
 import { ResponseStore } from "./protocol-state.mjs";
+import { createRouting } from "./bridge-routing.mjs";
+import { createHooks } from "./hooks.mjs";
 import {
   estimateChatRequestTokens,
   estimateChatResponseTokens,
@@ -186,6 +189,12 @@ const MAX_CONCURRENT_REQUESTS = intFrom(
   process.env.MIMO_BRIDGE_MAX_CONCURRENT || 8,
   8,
 );
+// 额度泄漏兜底：单个额度被持有超过该时长即强制回收。正常流式请求有
+// 90s 空闲看门狗、非流式有 60s 首包 + 10min 总超时，均远低于此值。
+const SLOT_REAP_AFTER_MS = intFrom(
+  process.env.MIMO_BRIDGE_SLOT_REAP_MS || 30 * 60 * 1000,
+  30 * 60 * 1000,
+);
 const BREAKER_FAILURES = intFrom(
   process.env.MIMO_BRIDGE_BREAKER_FAILURES || 3,
   3,
@@ -300,11 +309,131 @@ const responseStore = new ResponseStore({
   stateFile: path.join(INSTANCE_DIR, "responses-state.json"),
 });
 
+// ── 多上游路由 ────────────────────────────────────────────────────────
+// 一次请求一个上下文：fetchUpstream 从这里取"这一跳问哪家、用哪个 token"。
+// 用 AsyncLocalStorage 而不是全局变量，是因为并发请求会同时打到不同上游。
+const routeStore = new AsyncLocalStorage();
+const currentRoute = () => routeStore.getStore() || null;
+
+// 上游 token 按文件 mtime 缓存：别每个请求读一次盘。
+const upstreamTokenCache = new Map();
+function readUpstreamToken(file) {
+  if (!file) return "";
+  try {
+    const stat = fs.statSync(file);
+    const cached = upstreamTokenCache.get(file);
+    if (cached && cached.mtimeMs === stat.mtimeMs) return cached.value;
+    const value = fs.readFileSync(file, "utf8").trim();
+    upstreamTokenCache.set(file, { mtimeMs: stat.mtimeMs, value });
+    return value;
+  } catch {
+    return "";
+  }
+}
+
+const routing = createRouting({
+  dir: import.meta.dirname,
+  // MIMO_BRIDGE_UPSTREAMS=off 可以彻底关掉注册表（测试和"临时回到单上游"都用这个）
+  registryPath: (() => {
+    const raw = String(process.env.MIMO_BRIDGE_UPSTREAMS || "").trim();
+    if (/^(off|0|none|false)$/i.test(raw)) return path.join(import.meta.dirname, ".no-upstreams.json");
+    return raw || path.join(import.meta.dirname, "upstreams.json");
+  })(),
+  readFile: (file) => fs.readFileSync(file, "utf8"),
+  statSync: (file) => fs.statSync(file),
+  resolveBase: async (upstream) =>
+    upstream.kind === "mimo" ? await discoverEngine() : upstream.base,
+  readToken: (upstream) =>
+    readUpstreamToken(
+      path.isAbsolute(upstream.tokenFile)
+        ? upstream.tokenFile
+        : path.resolve(import.meta.dirname, upstream.tokenFile),
+    ),
+  readQuotaJson: () => {
+    try {
+      const quotaFile =
+        process.env.MIMO_BRIDGE_QUOTA ||
+        path.join(import.meta.dirname, "quota.json");
+      return JSON.parse(fs.readFileSync(quotaFile, "utf8"));
+    } catch {
+      return null;
+    }
+  },
+  warn: (message) => console.log("[route] " + message),
+});
+
+const hooks = createHooks({
+  dir: import.meta.dirname,
+  statSync: fs.statSync,
+  pathJoin: path.join,
+  warn: (message) => console.log("[hooks] " + message),
+});
+
+// 会话粘性：同一段对话（prompt_cache_key / session_id）尽量回同一家上游。
+const AFFINITY_TTL_MS = 30 * 60 * 1000;
+const sessionAffinity = new Map();
+function sessionKeyOf(body) {
+  return String(
+    body?.prompt_cache_key ||
+      body?.metadata?.session_id ||
+      body?.metadata?.session ||
+      body?.user ||
+      "",
+  );
+}
+function rememberAffinity(key, upstreamId) {
+  if (!key || !upstreamId) return;
+  sessionAffinity.set(key, { upstreamId, at: Date.now() });
+  if (sessionAffinity.size > 200) {
+    const now = Date.now();
+    for (const [k, v] of sessionAffinity) {
+      if (now - v.at > AFFINITY_TTL_MS) sessionAffinity.delete(k);
+    }
+  }
+}
+function affinityFor(key) {
+  if (!key) return "";
+  const hit = sessionAffinity.get(key);
+  if (!hit) return "";
+  if (Date.now() - hit.at > AFFINITY_TTL_MS) {
+    sessionAffinity.delete(key);
+    return "";
+  }
+  return hit.upstreamId;
+}
+
+/** 把 usage 记到当前请求的路由上下文：请求结束时一起写进请求日志。 */
+function noteUsage(usage, estimated = false) {
+  const route = currentRoute();
+  if (!route || !usage || typeof usage !== "object") return;
+  route.usage = {
+    prompt_tokens: Number(usage.prompt_tokens ?? usage.input_tokens) || 0,
+    completion_tokens: Number(usage.completion_tokens ?? usage.output_tokens) || 0,
+    total_tokens: Number(usage.total_tokens) || 0,
+    __estimated: Boolean(estimated),
+  };
+}
+
+// 当前这一跳是不是 MiMo：有路由就按路由选中的上游，没路由就退回启动参数。
+function isMimoUpstream() {
+  const route = currentRoute();
+  return route ? route.kind === "mimo" : isMimoUpstream();
+}
+
 const metrics = new MetricsRegistry({
   maxConcurrent: MAX_CONCURRENT_REQUESTS,
   breakerFailures: BREAKER_FAILURES,
   breakerCooldownMs: BREAKER_COOLDOWN_MS,
 });
+
+setInterval(() => {
+  for (const detail of metrics.reapStale(SLOT_REAP_AFTER_MS)) {
+    metrics.observeError("concurrency_slot_reaped");
+    console.error(
+      `[bridge] reaped stuck concurrency slot: ${JSON.stringify(detail)}`,
+    );
+  }
+}, 60 * 1000).unref();
 
 if (BRIDGE_AUTH_MODE === "legacy_shared_token") {
   console.warn(
@@ -469,7 +598,7 @@ async function discoverEngine(force = false) {
 
 function upstreamUrl(base, requestPath, keepQuery = true) {
   const url = new URL(base + requestPath);
-  if (UPSTREAM_KIND === "mimo") {
+  if (isMimoUpstream()) {
     url.searchParams.set("directory", INSTANCE_DIR);
   }
 
@@ -480,6 +609,30 @@ function upstreamUrl(base, requestPath, keepQuery = true) {
     }
   }
   return url;
+}
+
+/**
+ * 认一下这条请求是谁发的：优先看 agent 自己带的标识头，再看 UA。
+ * 不套模板——不认识就原样回 UA 前缀，总比写死"Codex"强。
+ */
+function detectClient(headers) {
+  const pick = ["originator", "x-client-name", "x-app", "x-title", "user-agent"]
+    .map((k) => String(headers[k] || ""))
+    .join(" ")
+    .toLowerCase();
+  if (!pick.trim()) return "未知客户端";
+  if (pick.includes("deepseek harness") || /\bdsh\b/.test(pick) || pick.includes("deepseek")) return "DSH";
+  if (pick.includes("codex")) return "Codex";
+  if (pick.includes("claude")) return "Claude Code";
+  if (pick.includes("gemini")) return "Gemini CLI";
+  if (pick.includes("cursor")) return "Cursor";
+  if (pick.includes("opencode")) return "OpenCode";
+  if (pick.includes("cherry")) return "Cherry Studio";
+  if (pick.includes("openai-python") || pick.includes("openai/")) return "OpenAI SDK";
+  if (pick.includes("python")) return "Python 客户端";
+  if (pick.includes("node") || pick.includes("undici")) return "Node 客户端";
+  if (pick.includes("curl")) return "curl";
+  return String(headers["user-agent"] || "未知客户端").slice(0, 28);
 }
 
 function createAbortContext(externalSignals, timeoutMs = UPSTREAM_TIMEOUT_MS) {
@@ -676,11 +829,11 @@ async function fetchKnownModels(base) {
   if (knownModels && Date.now() - knownModelsFetchedAt < 60000) return knownModels;
   try {
     const url = new URL(base + "/v1/models");
-    if (UPSTREAM_KIND === "mimo") {
+    if (isMimoUpstream()) {
       url.searchParams.set("directory", INSTANCE_DIR);
     }
     const response = await fetch(url, {
-      headers: { Authorization: "Bearer " + TOKEN },
+      headers: { Authorization: "Bearer " + (currentRoute()?.token || TOKEN) },
       signal: AbortSignal.timeout(5000),
     });
     if (!response.ok) return knownModels;
@@ -852,6 +1005,70 @@ async function readUpstreamError(upstream) {
   );
 }
 
+/**
+ * 带上跨上游 failover 的 fetch：
+ * 传输失败（连不上）、408/429/5xx 都算"这家答不了"，按路由顺序换下一家，
+ * 直到拿到一个非重试类的响应，或者候选全部试完（把最后一个错误抛出去）。
+ *
+ * 只在多上游模式下走这条路；单上游模式仍走原来的"重发现 + 重试一次"。
+ */
+async function fetchUpstreamWithFailover({ urlFor, init, abortContext, requestId, accept, first, model, session }) {
+  const tried = [];
+  let route = first;
+  let lastError = null;
+  for (let round = 0; round < 8; round += 1) {
+    if (!route || !route.base) throw lastError || new Error("没有可用上游");
+    const context = currentRoute();
+    if (context) {
+      context.upstreamId = route.upstreamId;
+      context.kind = route.kind;
+      context.token = route.token;
+      context.base = route.base;
+      context.capabilities = route.capabilities;
+      context.model = route.model;
+    }
+    let response;
+    try {
+      // init 可以是函数：换到路由组的另一家时，模型 ID 也得跟着换
+      const requestInit = typeof init === "function" ? init(route) : init;
+      response = await fetchUpstream(urlFor(route.base), requestInit, abortContext, requestId, accept);
+    } catch (error) {
+      lastError = error;
+      tried.push(route.upstreamId);
+      routing.noteResult(route.upstreamId, { error });
+      debugLog({
+        requestId,
+        event: "route_failover",
+        from: route.upstreamId,
+        reason: String(error?.message ?? error),
+      });
+      const next = await routing.pick({ model, session, exclude: tried });
+      if (!next.ok) throw error;
+      route = next;
+      continue;
+    }
+
+    routing.noteResult(route.upstreamId, { status: response.status });
+    if (isRetryableStatus(response.status)) {
+      tried.push(route.upstreamId);
+      debugLog({
+        requestId,
+        event: "route_failover",
+        from: route.upstreamId,
+        reason: "status " + response.status,
+      });
+      const next = await routing.pick({ model, session, exclude: tried });
+      if (next.ok) {
+        response.body?.cancel?.().catch(() => {});
+        route = next;
+        continue;
+      }
+    }
+    return { response, route };
+  }
+  throw lastError || new Error("上游全部试过仍失败");
+}
+
 async function fetchUpstream(
   target,
   init,
@@ -876,7 +1093,7 @@ async function fetchUpstream(
       ...init,
       signal: abortContext.signal,
       headers: {
-        Authorization: "Bearer " + TOKEN,
+        Authorization: "Bearer " + (currentRoute()?.token || TOKEN),
         "Content-Type": "application/json",
         Accept: accept || "*/*",
         "X-Request-ID": requestId || "",
@@ -1166,6 +1383,7 @@ async function proxyResponsesStream({
         rememberResponse(retryResponse, cancellation);
         if (retryResponse.usage?.total_tokens) {
           metrics.observeUsage(retryResponse.usage);
+          noteUsage(retryResponse.usage);
         }
         for (const evt of responseEvents(retryResponse)) {
           await sseWrite(res, evt);
@@ -1184,8 +1402,10 @@ async function proxyResponsesStream({
       rememberResponse(finalResponse, cancellation);
       if (translator.usageEstimated()) {
         metrics.observeEstimatedUsage(finalResponse.usage);
+        noteUsage(finalResponse.usage, true);
       } else {
         metrics.observeUsage(finalResponse.usage);
+        noteUsage(finalResponse.usage);
       }
     }
     for (const evt of [...deferredEvents, ...completedEvents]) {
@@ -1481,7 +1701,78 @@ function enrichTraeModelsList(payload) {
 
 // GET /v1/models：拉上游列表，trae 上游补齐元数据后下发。原先是原样透传，
 // 客户端只能拿到 context_length，最大输出数一概没有。
+/**
+ * 多上游模式下的模型列表：把每家的 /v1/models 合成一份，模型 ID 加上游前缀，
+ * 路由组以 group/<id> 出现在列表里。某一家挂了不影响其它家（只在 bridge_upstreams 里说明）。
+ */
+async function handleModelsListAll(req, res, requestId) {
+  routing.reload();
+  const registry = routing.registry;
+  if (!registry) {
+    return sendError(res, 503, "upstreams.json 未就绪", requestId, "route_unavailable");
+  }
+
+  const hidden = new Set();
+  for (const group of registry.groups.values()) {
+    if (group.listed) continue;
+    for (const model of group.models) hidden.add(model);
+  }
+
+  const data = [];
+  const upstreamErrors = [];
+  for (const upstream of registry.upstreams.values()) {
+    let base = "";
+    try {
+      base = upstream.kind === "mimo" ? await discoverEngine() : upstream.base;
+    } catch {
+      base = "";
+    }
+    if (!base) {
+      upstreamErrors.push({ upstream: upstream.id, error: "未就绪" });
+      continue;
+    }
+    const token = readUpstreamToken(path.resolve(import.meta.dirname, upstream.tokenFile));
+    const url = new URL(base + "/v1/models");
+    if (upstream.kind === "mimo") url.searchParams.set("directory", INSTANCE_DIR);
+    try {
+      const response = await fetch(url, {
+        headers: { Authorization: "Bearer " + (token || TOKEN) },
+        signal: AbortSignal.timeout(5000),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!payload || !Array.isArray(payload.data)) {
+        upstreamErrors.push({ upstream: upstream.id, error: "invalid upstream JSON" });
+        continue;
+      }
+      if (upstream.kind === "trae") enrichTraeModelsList(payload);
+      for (const item of payload.data) {
+        const id = String(item?.id ?? "");
+        if (!id) continue;
+        const full = upstream.id + "/" + id;
+        if (hidden.has(full)) continue;
+        data.push({ ...item, id: full, owned_by: item.owned_by || upstream.id });
+      }
+    } catch (error) {
+      upstreamErrors.push({ upstream: upstream.id, error: String(error?.message ?? error) });
+    }
+  }
+
+  for (const group of registry.groups.values()) {
+    data.push({
+      id: "group/" + group.id,
+      object: "model",
+      created: 0,
+      owned_by: "bridge",
+      bridge_group_models: group.models,
+      bridge_routing: group.routing,
+    });
+  }
+
+  return sendJson(res, 200, { object: "list", data, bridge_upstreams: upstreamErrors }, requestId);
+}
+
 async function handleModelsList(req, res, requestId) {
+  if (routing.enabled) return handleModelsListAll(req, res, requestId);
   const base = await discoverEngine();
   if (!base) {
     return sendError(
@@ -1494,7 +1785,7 @@ async function handleModelsList(req, res, requestId) {
     );
   }
   const url = new URL(base + "/v1/models");
-  if (UPSTREAM_KIND === "mimo") {
+  if (isMimoUpstream()) {
     url.searchParams.set("directory", INSTANCE_DIR);
   }
   const abortContext = createAbortContext();
@@ -1601,6 +1892,18 @@ async function proxyChatUpstream({ req, res, upstream, requestId }) {
   }
   if (payload.usage) {
     payload.usage = decorateUpstreamUsage(payload.usage, { fillZero: true });
+    noteUsage(payload.usage);
+  } else if (TOKEN_ESTIMATE_ENABLED) {
+    const estimated = estimatedUsageFor(chatBodyForUsage || {}, payload);
+    if (estimated) {
+      payload.usage = {
+        prompt_tokens: estimated.prompt_tokens,
+        completion_tokens: estimated.completion_tokens,
+        total_tokens: estimated.total_tokens,
+      };
+      metrics.observeEstimatedUsage(estimated);
+      noteUsage(payload.usage, true);
+    }
   }
   return sendJson(res, upstream.status, payload, requestId);
 }
@@ -1620,12 +1923,38 @@ async function proxyPassThrough({
   const upstreamRequestId = upstream.headers.get("x-request-id");
   if (upstreamRequestId) headers["X-Upstream-Request-ID"] = upstreamRequestId;
 
-  res.writeHead(upstream.status, headers);
   if (!upstream.body) {
+    res.writeHead(upstream.status, headers);
     res.end();
     return;
   }
 
+  // 非流式的 JSON 可以顺手读出来统计 usage；流式的必须逐 chunk 透传，不动它
+  const contentType = String(headers["Content-Type"] || "");
+  if (!/text\/event-stream/i.test(contentType)) {
+    const chunks = [];
+    for await (const chunk of upstream.body) chunks.push(Buffer.from(chunk));
+    const raw = Buffer.concat(chunks);
+    const text = raw.toString("utf8");
+    try {
+      const payload = JSON.parse(text);
+      if (payload && payload.usage) {
+        noteUsage(payload.usage);
+        metrics.observeUsage(payload.usage);
+      } else if (payload && TOKEN_ESTIMATE_ENABLED) {
+        const estimated = estimatedUsageFor(chatBodyForUsage || {}, payload);
+        if (estimated) {
+          metrics.observeEstimatedUsage(estimated);
+          noteUsage({ prompt_tokens: estimated.prompt_tokens, completion_tokens: estimated.completion_tokens, total_tokens: estimated.total_tokens }, true);
+        }
+      }
+    } catch { /* 不是 JSON 就原样转发 */ }
+    res.writeHead(upstream.status, { ...headers, "Content-Length": String(raw.length) });
+    res.end(raw);
+    return;
+  }
+
+  res.writeHead(upstream.status, headers);
   try {
     for await (const chunk of upstream.body) {
       if (res.destroyed) break;
@@ -1737,6 +2066,7 @@ async function handleApiRequest(req, res, metricState = null) {
           anthropic_messages: true,
           anthropic_count_tokens: true,
         },
+        routing: routing.describe(),
         responseState: responseStore.snapshot(),
         metrics: snapshot,
       },
@@ -1887,7 +2217,9 @@ async function handleApiRequest(req, res, metricState = null) {
       }
       throw error;
     }
-    if (!RAW_CHAT && !isAnthropicMessages && !isAnthropicCount) {
+    // 有路由表时模型 ID 由注册表决定（provider/model 或 group/id），
+    // 不能再按启动参数里的 MODEL_PREFIX 去补前缀。
+    if (!RAW_CHAT && !isAnthropicMessages && !isAnthropicCount && !routing.enabled) {
       normalizeModel(body);
     }
 
@@ -1929,13 +2261,94 @@ async function handleApiRequest(req, res, metricState = null) {
     }
   }
 
+  // ── 多上游：先决定这一跳问谁，再谈协议转换 ─────────────────────────────
+  // 选完才做 toChatRequest：Anthropic/Responses 的转换要按上游能力走
+  // （mapThinkingToReasoning、reasoning 开关归一化都看 isMimoUpstream()）。
+  let selected = null;
+  // routeKey 是"客户端要的那一个模型"（group/x 或 provider/model）。
+  // 选中之后 body.model 会被改写成上游真实模型名，failover 再选的时候必须用 routeKey。
+  let routeKey = "";
+  if (routing.enabled && body && typeof body === "object" && body.model) {
+    routing.reload();
+    const previousMeta = body.previous_response_id
+      ? responseStore.meta(body.previous_response_id)
+      : null;
+    const affinityKey = sessionKeyOf(body);
+    routeKey = String(body.model);
+    selected = await routing.pick({
+      model: routeKey,
+      pinned: previousMeta?.upstreamId
+        ? { upstreamId: previousMeta.upstreamId, model: previousMeta.model }
+        : undefined,
+      session: { lastAnsweredId: previousMeta?.upstreamId || affinityFor(affinityKey) },
+    });
+
+    if (!selected.ok) {
+      debugLog({ requestId, event: "route_failed", error: selected.error });
+      return sendError(
+        res,
+        503,
+        "route: " + String(selected.error || "没有可用上游"),
+        requestId,
+        "route_unavailable",
+      );
+    }
+
+    const route = currentRoute();
+    if (route) {
+      route.upstreamId = selected.upstreamId;
+      route.kind = selected.kind;
+      route.token = selected.token;
+      route.base = selected.base;
+      route.capabilities = selected.capabilities;
+      route.model = selected.model;
+    }
+    if (selected.model && body.model !== selected.model) body.model = selected.model;
+    rememberAffinity(affinityKey, selected.upstreamId);
+    metrics.setUpstream(metricState, selected.upstreamId);
+    routing.noteDecision({
+      model: routeKey,
+      chosen: selected.upstreamId,
+      order: selected.order,
+      notes: selected.notes,
+      pinned: Boolean(selected.pinned),
+      reason: selected.reason,
+    });
+    debugLog({
+      requestId,
+      event: "route",
+      upstream: selected.upstreamId,
+      model: selected.model,
+      reason: selected.reason,
+      pinned: Boolean(selected.pinned),
+      order: Array.isArray(selected.order) ? selected.order.map((item) => item.id) : [],
+      notes: selected.notes,
+    });
+  }
+
+  // 请求钩子（hooks/before-request.mjs）：只允许改白名单字段，出错/超时一律跳过。
+  if (body && typeof body === "object") {
+    const patch = await hooks.beforeRequest({
+      requestId,
+      path: requestPath,
+      model: body.model,
+      upstreamId: currentRoute()?.upstreamId || null,
+      body,
+    });
+    if (patch && typeof patch === "object") {
+      Object.assign(body, patch);
+      debugLog({ requestId, event: "hook_patch", keys: Object.keys(patch) });
+    }
+  }
+
   metrics.setModel(metricState, body.model);
+  metrics.setStream(metricState, body && body.stream === true);
   let chatBody = body;
 
   if (isAnthropicMessages) {
     try {
       chatBody = toChatRequestFromAnthropic(body, {
-        mapThinkingToReasoning: UPSTREAM_KIND === "mimo",
+        mapThinkingToReasoning: isMimoUpstream(),
       });
     } catch (error) {
       return sendAnthropicError(
@@ -1947,10 +2360,10 @@ async function handleApiRequest(req, res, metricState = null) {
       );
     }
     if (!RAW_CHAT) normalizeModel(chatBody);
-    if (UPSTREAM_KIND === "mimo" && isAnthropicMessages && body.thinking?.type === "enabled") {
+    if (isMimoUpstream() && isAnthropicMessages && body.thinking?.type === "enabled") {
       chatBody.reasoning_effort = "high";
     }
-    if (UPSTREAM_KIND === "mimo") normalizeMiMoReasoningToggle(chatBody);
+    if (isMimoUpstream()) normalizeMiMoReasoningToggle(chatBody);
     chatBody.stream = body.stream === true;
     if (chatBody.stream) {
       chatBody.stream_options = {
@@ -1983,7 +2396,7 @@ async function handleApiRequest(req, res, metricState = null) {
       );
     }
 
-    if (UPSTREAM_KIND === "mimo") normalizeMiMoReasoningToggle(chatBody);
+    if (isMimoUpstream()) normalizeMiMoReasoningToggle(chatBody);
 
     if (body.background === true) {
       // 控制器必须先建并登记，否则 cancel 端点拿不到可中断的东西，
@@ -1995,8 +2408,17 @@ async function handleApiRequest(req, res, metricState = null) {
       );
       body.__queuedId = queued.id;
       chatBody.stream = false;
+      // 后台响应跑在另一个异步上下文里，得把这一跳的路由快照带过去
+      body.__route = currentRoute() ? { ...currentRoute() } : null;
       setImmediate(() => {
-        void runBackgroundResponse(body, chatBody, requestId);
+        const snapshot = body.__route;
+        if (snapshot) {
+          routeStore.run({ ...snapshot }, () => {
+            void runBackgroundResponse(body, chatBody, requestId);
+          });
+        } else {
+          void runBackgroundResponse(body, chatBody, requestId);
+        }
       });
       return sendJson(res, 200, queued, requestId);
     }
@@ -2036,20 +2458,23 @@ async function handleApiRequest(req, res, metricState = null) {
   let droppedReasoningEffort = false;
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const base = await discoverEngine(attempt > 0);
+    const base = selected?.base || (await discoverEngine(attempt > 0));
     if (!base) {
       abortContext.dispose();
       return sendError(
         res,
         503,
-          PASSTHROUGH_UPSTREAM
+        selected
+          ? `上游 ${selected.upstreamId} 不可达：${selected.kind === "mimo" ? "MiMo Desktop 没在跑" : "网关没起来"}`
+          : PASSTHROUGH_UPSTREAM
             ? `${UPSTREAM_KIND} gateway not found; start it on the configured upstream URL`
             : "MiMo Desktop engine not found; start the desktop app and rerun mint-token.mjs",
         requestId,
       );
     }
 
-    await applyModelFallback(base, chatBody);
+    // 有路由表时，模型兜底由该上游的 capabilities.fallbackModel 承担
+    if (!selected) await applyModelFallback(base, chatBody);
     stripRejectedReasoningEffort(chatBody);
     const target = upstreamUrl(base, upstreamPath);
     const upstreamRequestStartedAt = Date.now();
@@ -2061,20 +2486,47 @@ async function handleApiRequest(req, res, metricState = null) {
             : "application/json"
           : req.headers.accept || "*/*";
 
-      const upstream = await fetchUpstream(
-        target,
-        {
-          method: req.method,
-          body:
-            req.method === "POST"
-              ? JSON.stringify(chatBody)
-              : undefined,
-        },
-        abortContext,
-        requestId,
-        accept,
-      );
-
+      const upstreamRequest = {
+        method: req.method,
+        body:
+          req.method === "POST"
+            ? JSON.stringify(chatBody)
+            : undefined,
+      };
+      let upstream;
+      if (selected) {
+        const picked = await fetchUpstreamWithFailover({
+          urlFor: (attemptBase) => upstreamUrl(attemptBase, upstreamPath),
+          init: (route) => {
+            if (route?.model && chatBody && chatBody.model !== route.model) {
+              chatBody.model = route.model;
+            }
+            return {
+              method: req.method,
+              body:
+                req.method === "POST"
+                  ? JSON.stringify(chatBody)
+                  : undefined,
+            };
+          },
+          abortContext,
+          requestId,
+          accept,
+          first: selected,
+          model: routeKey || chatBody?.model || body?.model,
+          session: { lastAnsweredId: selected.upstreamId },
+        });
+        upstream = picked.response;
+        selected = { ...selected, ...picked.route };
+      } else {
+        upstream = await fetchUpstream(
+          target,
+          upstreamRequest,
+          abortContext,
+          requestId,
+          accept,
+        );
+      }
       metrics.observeUpstreamHeader(
         Date.now() - upstreamRequestStartedAt,
       );
@@ -2200,6 +2652,10 @@ async function handleApiRequest(req, res, metricState = null) {
             normalizeStructuredResponse(response, body),
           );
           applyEstimatedUsage(response, chatBody, payload);
+          // 估算器会改写 response.usage；同步到路由日志，否则用量页全是 0
+          if (response.usage && response.usage.total_tokens) {
+            noteUsage(response.usage, !hasRealUsage(response.usage));
+          }
           metrics.observeFirstToken(
             metricState,
             Date.now() - metricState.startedAt,
@@ -2275,14 +2731,18 @@ async function handleApiRequest(req, res, metricState = null) {
                 (message.usage.input_tokens || 0) +
                 (message.usage.output_tokens || 0),
             });
+            noteUsage(message.usage);
           } else if (TOKEN_ESTIMATE_ENABLED) {
-            metrics.observeEstimatedUsage({
-              input_tokens: message.usage?.input_tokens || 0,
-              output_tokens: message.usage?.output_tokens || 0,
-              total_tokens:
-                (message.usage?.input_tokens || 0) +
-                (message.usage?.output_tokens || 0),
-            });
+            const estimated = estimatedUsageFor(chatBody, message);
+            if (estimated) {
+              message.usage = {
+                input_tokens: estimated.prompt_tokens,
+                output_tokens: estimated.completion_tokens,
+                total_tokens: estimated.total_tokens,
+              };
+              metrics.observeEstimatedUsage(estimated);
+              noteUsage(message.usage, true);
+            }
           }
           sendJson(res, 200, message, requestId);
         }
@@ -2446,7 +2906,12 @@ function normalizeStructuredResponse(response, requestBody) {
 }
 
 function rememberResponse(response, controller = null) {
-  if (response?.id) responseStore.put(response.id, response, controller);
+  if (response?.id) {
+    responseStore.put(response.id, response, controller, {
+      upstreamId: currentRoute()?.upstreamId || null,
+      model: currentRoute()?.model || response.model || null,
+    });
+  }
   return response;
 }
 
@@ -2460,7 +2925,11 @@ async function runBackgroundResponse(body, chatBody, requestId) {
 
   // HTTP 响应早已返回，metrics 里对应的额度已经释放；这里必须重新申请，
   // 否则 max_concurrent_requests 对 background 请求完全不起作用。
-  const slot = metrics.tryBegin({ countTotal: false });
+  const slot = metrics.tryBegin({
+    countTotal: false,
+    requestId,
+    path: "/v1/responses:background",
+  });
   if (!slot) {
     responseStore.patch(queuedId, {
       status: "failed",
@@ -2476,13 +2945,15 @@ async function runBackgroundResponse(body, chatBody, requestId) {
 
   let outcomeStatus = 200;
   try {
-    const base = await discoverEngine();
+    const base = currentRoute()?.base || (await discoverEngine());
     if (!base) {
       throw Object.assign(
         new Error(
-          PASSTHROUGH_UPSTREAM
-            ? `${UPSTREAM_KIND} gateway not found`
-            : "MiMo Desktop engine not found",
+          currentRoute()?.upstreamId
+            ? `上游 ${currentRoute().upstreamId} 不可达`
+            : PASSTHROUGH_UPSTREAM
+              ? `${UPSTREAM_KIND} gateway not found`
+              : "MiMo Desktop engine not found",
         ),
         { statusCode: 503 },
       );
@@ -2490,7 +2961,7 @@ async function runBackgroundResponse(body, chatBody, requestId) {
 
     // 与前台路径对齐：后台请求同样要做模型兜底，否则 MiMo 改模型 ID 后
     // 后台响应会直接打到不存在的模型上。
-    await applyModelFallback(base, chatBody);
+    if (!currentRoute()?.upstreamId) await applyModelFallback(base, chatBody);
     stripRejectedReasoningEffort(chatBody);
 
     const upstream = await fetchUpstream(
@@ -2527,6 +2998,9 @@ async function runBackgroundResponse(body, chatBody, requestId) {
     response.id = queuedId;
     response.background = true;
     applyEstimatedUsage(response, chatBody, payload);
+    if (response.usage && response.usage.total_tokens) {
+      noteUsage(response.usage, !hasRealUsage(response.usage));
+    }
     rememberResponse(response);
   } catch (error) {
     const current = responseStore.get(queuedId);
@@ -2556,6 +3030,9 @@ const server = http.createServer((req, res) => {
   const requestUrl = new URL(req.url || "/", "http://bridge.local");
   const requestPath = requestUrl.pathname;
   const operational = requestPath.startsWith("/v1/");
+  const requestId =
+    String(req.headers["x-request-id"] || "") ||
+    "bridge_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
 
   if (
     !ALLOW_ANY_HOST &&
@@ -2584,7 +3061,11 @@ const server = http.createServer((req, res) => {
     req.method === "POST";
 
   if (consumesUpstream) {
-    metricState = metrics.tryBegin({ countTotal: false });
+    metricState = metrics.tryBegin({
+      countTotal: false,
+      requestId,
+      path: `${req.method} ${requestPath}`,
+    });
     if (!metricState) {
       res.setHeader("Retry-After", "1");
       sendError(
@@ -2596,23 +3077,58 @@ const server = http.createServer((req, res) => {
       );
       return;
     }
-    res.once("finish", () => metrics.finish(metricState, res.statusCode));
+    metrics.setClient(metricState, detectClient(req.headers));
+    res.once("finish", () => {
+      const route = currentRoute();
+      if (route && route.usage) {
+        metrics.noteUsage(metricState, {
+          prompt_tokens: route.usage.prompt_tokens,
+          completion_tokens: route.usage.completion_tokens,
+          total_tokens: route.usage.total_tokens,
+          __estimated: route.usage.__estimated,
+        });
+      }
+      metrics.finish(metricState, res.statusCode);
+    });
     res.once("close", () => {
-      if (!res.writableEnded) metrics.finish(metricState, 499);
+      if (!res.writableEnded) {
+        const route = currentRoute();
+        if (route && route.usage) {
+          metrics.noteUsage(metricState, {
+            prompt_tokens: route.usage.prompt_tokens,
+            completion_tokens: route.usage.completion_tokens,
+            total_tokens: route.usage.total_tokens,
+            __estimated: route.usage.__estimated,
+          });
+        }
+        metrics.finish(metricState, 499);
+      }
     });
   }
 
-  handleApiRequest(req, res, metricState).catch((error) => {
-    if (!res.writableEnded) {
-      sendError(
-        res,
-        error?.statusCode || 500,
-        String(error?.message ?? error),
-        undefined,
-        error?.code || error?.type || "internal_error",
-      );
-    }
-  });
+  // 每个请求一个路由上下文：并发请求各自记自己这一跳用哪家上游的 base/token。
+  routeStore.run(
+    {
+      token: TOKEN,
+      kind: UPSTREAM_KIND,
+      base: null,
+      upstreamId: null,
+      capabilities: null,
+      model: null,
+    },
+    () =>
+      handleApiRequest(req, res, metricState).catch((error) => {
+        if (!res.writableEnded) {
+          sendError(
+            res,
+            error?.statusCode || 500,
+            String(error?.message ?? error),
+            undefined,
+            error?.code || error?.type || "internal_error",
+          );
+        }
+      }),
+  );
 });
 
 server.on("clientError", (_error, socket) => {

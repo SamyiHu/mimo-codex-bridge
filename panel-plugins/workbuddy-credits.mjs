@@ -352,87 +352,63 @@ export default {
     });
 
     registerCard(`
-      <section class="card">
-        <h2>WorkBuddy 积分（插件）</h2>
-        <div class="rows" id="wbc-pool"><div class="empty">加载中…</div></div>
-        <div class="rows" id="wbc-stats"><div class="empty">统计加载中…</div></div>
-        <div class="rows" id="wbc-rates"><div class="empty">模型倍率加载中…</div></div>
-        <div class="actions">
-          <button class="btn primary" type="button" id="wbc-login"><span class="btn-label">登录新账号</span></button>
-          <button class="btn" type="button" id="wbc-report"><span class="btn-label">刷新积分日报</span></button>
-          <button class="btn" type="button" id="wbc-checkin"><span class="btn-label">立即签到</span></button>
-          <button class="btn" type="button" id="wbc-admin-ensure"><span class="btn-label">开启管理端点并重启网关</span></button>
+                        <section class="card">
+        <div class="phead">
+          <h2>WorkBuddy 积分</h2>
+          <div class="phead-sub">账号 · 用量 · 模型倍率 · 点行展开明细</div>
+        </div>
+        <div class="pblock">
+          <div class="pblock-head">账号
+            <span class="grow"></span>
+            <button class="btn sm primary" type="button" id="wbc-login"><span class="btn-label">登录新账号</span></button>
+            <button class="btn sm" type="button" id="wbc-report"><span class="btn-label">刷新积分日报</span></button>
+            <button class="btn sm" type="button" id="wbc-checkin"><span class="btn-label">立即签到</span></button>
+            <button class="btn sm quiet" type="button" id="wbc-admin-ensure"><span class="btn-label">管理端点</span></button>
+          </div>
+          </div>
+        <div class="split-2">
+          <div class="pblock pane">
+            <div class="pblock-head">账号 <span class="k">点行看台账</span></div>
+            <div class="list-scroll" id="wbc-pool"><div class="empty">加载中…</div></div>
+            <div class="pblock-head">用量</div>
+            <div class="rows" id="wbc-stats"><div class="empty">统计加载中…</div></div>
+          </div>
+          <div class="pblock pane">
+            <div class="pblock-head">模型倍率 <span class="k">点行看参数</span></div>
+            <div class="list-scroll" id="wbc-rates"><div class="empty">模型倍率加载中…</div></div>
+          </div>
         </div>
         <div id="wbc-login-box">
           <div>域：
             <label><input type="radio" name="wbc-realm" value="cn" checked /> 国内版 cn</label>
             <label><input type="radio" name="wbc-realm" value="global" /> 国际版 global</label>
           </div>
-          <div>1. 打开授权链接，用 WorkBuddy 账号登录：</div>
+          <div>打开授权链接，用 WorkBuddy 账号登录：</div>
           <div><a id="wbc-login-url" href="#" target="_blank" rel="noopener">(生成中…)</a></div>
           <div id="wbc-login-state">等待发起…</div>
           <div class="actions" style="margin-top: 8px;">
             <button class="btn" type="button" id="wbc-login-cancel"><span class="btn-label">取消登录</span></button>
           </div>
         </div>
-        <div class="rows" id="wbc-report-body">
-          <div class="empty">积分日报未拉取。点「刷新积分日报」会实查上游余额（走 workbuddy2api 的 credit 工具）。</div>
-        </div>
-        <style>
-          #wbc-rates {
-            max-height: 400px; overflow: auto;
-            scrollbar-width: thin; scrollbar-color: var(--line) transparent;
-          }
-          #wbc-rates::-webkit-scrollbar { width: 6px; }
-          #wbc-rates::-webkit-scrollbar-track { background: transparent; }
-          #wbc-rates::-webkit-scrollbar-button { display: none; }
-          #wbc-rates::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
-          #wbc-rates::-webkit-scrollbar-thumb:hover { background: var(--muted); }
-          #wbc-rates .wrc-hint { color: var(--muted); font-size: 11px; margin: 2px 0 8px; }
-          #wbc-rates .wrc-sub { color: var(--muted); font-size: 11px; margin: 12px 0 6px; }
-          #wbc-rates table.wrc-table {
-            width: 100%; border-collapse: collapse;
-            font: 12px/1.6 ui-monospace, Consolas, monospace;
-          }
-          #wbc-rates .wrc-table th {
-            position: sticky; top: 0; background: var(--panel);
-            color: var(--muted); font-weight: normal; font-size: 11px;
-            text-align: right; padding: 3px 10px 4px 8px; border-bottom: 1px solid var(--line);
-          }
-          #wbc-rates .wrc-table td {
-            text-align: right; padding: 3px 10px 3px 8px;
-            border-bottom: 1px solid var(--line); color: var(--ink);
-          }
-          #wbc-rates .wrc-table th:first-child, #wbc-rates .wrc-table td:first-child { text-align: left; }
-          #wbc-rates .wrc-table td.num { font-variant-numeric: tabular-nums; }
-          #wbc-rates .wrc-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-          #wbc-rates .wrc-chip {
-            border: 1px solid var(--line); border-radius: 10px; padding: 1px 9px;
-            font: 11px/1.7 ui-monospace, Consolas, monospace; color: var(--muted);
-          }
-          #wbc-rates .wrc-chip b { color: var(--ink); font-weight: normal; }
-          #wbc-checkin-out {
-            display: none; margin: 8px 0 0; padding: 10px 12px;
-            background: var(--panel-2); border: 1px solid var(--line);
-            border-left: 2px solid var(--accent); border-radius: 8px;
-            color: var(--ink); font: 12px/1.6 ui-monospace, Consolas, monospace;
-            white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow: auto;
-          }
-          #wbc-checkin-out.show { display: block; }
-          #wbc-login-box { display: none; margin: 8px 0 0; padding: 10px 12px;
-            background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; }
-          #wbc-login-box.show { display: block; }
-          #wbc-login-box a { color: var(--accent-2); word-break: break-all; }
-          #wbc-login-box label { margin-right: 10px; }
-          #wbc-login-state { margin-top: 6px; color: var(--muted); font-size: 12px; }
-          .wbc-act { cursor: pointer; margin-left: 6px; }
-        </style>
         <pre id="wbc-checkin-out"></pre>
+        <style>
+          #wbc-login-box, #wbc-checkin-out { display: none; }
+          #wbc-login-box.show, #wbc-checkin-out.show { display: block; }
+        </style>
       </section>
       <script>
       (function () {
         var BASE = "/api/plugins/workbuddy-credits";
         function byId(id) { return document.getElementById(id); }
+// 面板里的弹层；没有就退回原生 alert（下面板单独跑时也能用）
+function uiAlert(text) {
+  if (window.__uiAlert) return window.__uiAlert("提示", text);
+  return uiAlert(text);
+}
+async function uiPrompt(label, def) {
+  if (window.__uiPrompt) return await window.__uiPrompt("输入", label, def);
+  return prompt(label, def);
+}
         function esc(s) {
           return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
             return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
@@ -442,7 +418,7 @@ export default {
           return '<div class="row"><div class="k">' + esc(k) + '</div><div class="v">' + v + "</div></div>";
         }
         function act(label, fn) {
-          return '<span class="wbc-act" data-act="' + esc(fn) + '">' + esc(label) + "</span>";
+          return '<button type="button" class="act-link wbc-act" data-act="' + esc(fn) + '">' + esc(label) + "</button>";
         }
         function poolText(t) {
           if (!t) return "—";
@@ -461,6 +437,15 @@ export default {
           return "余额 " + (a.credits != null ? a.credits : "—") + "（签到快照）";
         }
 
+        // 台账直接摊在账号行下面：一级信息，不弹窗
+        function ledgerInline(a) {
+          var mc = a && a.model_costs ? a.model_costs : [];
+          if (!mc.length) return '<span class="k">台账：暂无样本（还没跑过请求）</span>';
+          return '<span class="k">台账 · 每千 token 实测：</span> ' + mc.map(function (m) {
+            return '<span class="mono">' + esc(m.model) + "</span> " + Number(m.cost_per_1k || 0).toFixed(4) +
+              '<span class="k">（样本 ' + (m.samples || 0) + "）</span>";
+          }).join(' <span class="k">·</span> ');
+        }
         function ledgerText(a) {
           var mc = a.model_costs || [];
           if (!mc.length) return "（暂无台账：该账号还没跑过请求）";
@@ -473,40 +458,55 @@ export default {
 
         function renderPool(d) {
           var el = byId("wbc-pool");
+          if (!el) return;
           if (!d || !d.ok) {
             el.innerHTML = row("账号池", '<span class="dot err"></span>' + esc(d && d.error ? d.error : "不可达"));
             return;
           }
           var st = d.status;
-          var rt = st.realm_totals || {};
-          var html =
-            row("账号池", '<span class="dot ok"></span>' + esc(poolText(st))) +
-            row("cn 域", esc(poolText(rt.cn))) +
-            row("global 域", esc(poolText(rt.global)));
           var accs = Array.isArray(st.accounts) ? st.accounts : [];
           accountsCache = accs;
-          accs.forEach(function (a) {
+          var html = '<div class="pool-strip">' +
+            "<span><b>" + accs.length + "</b>账号</span>" +
+            "<span><b>" + accs.filter(function (a) { return !a.cooling && !a.disabled && !a.manual_disabled; }).length + "</b>健康</span>" +
+            "<span><b>" + accs.filter(function (a) { return a.cooling; }).length + "</b>冷却</span>" +
+            "<span><b>" + accs.filter(function (a) { return a.disabled || a.manual_disabled; }).length + "</b>停用</span>" +
+            "</div>";
+          html += '<table class="p-table"><thead><tr><th>账号</th><th class="num">积分</th><th class="num">成功</th><th class="num">台账</th><th>状态</th><th></th></tr></thead><tbody>';
+          accs.forEach(function (a, i) {
             var flags =
-              (a.cooling ? ' <span class="chip warn">冷却</span>' : "") +
-              (a.disabled ? ' <span class="chip err">自动禁用</span>' : "") +
-              (a.manual_disabled ? ' <span class="chip err">手动停用</span>' : "") +
-              ((a.rate_limited_models || []).length ? ' <span class="chip warn">限流 ' + a.rate_limited_models.length + "</span>" : "");
+              (a.cooling ? '<span class="chip warn">冷却</span>' : "") +
+              (a.disabled ? '<span class="chip err">自动禁用</span>' : "") +
+              (a.manual_disabled ? '<span class="chip err">手动停用</span>' : "") +
+              ((a.rate_limited_models || []).length
+                ? '<span class="chip warn">限流 ' + esc((a.rate_limited_models || []).map(function (x) { return x.model; }).join(" · ")) + "</span>"
+                : "");
             var acts =
               (a.manual_disabled ? act("启用", "enable:" + a.uid) : act("停用", "disable:" + a.uid)) +
-              act("复活", "revive:" + a.uid) +
-              act("台账", "ledger:" + a.uid);
-            html += row(
-              (a.nickname || String(a.uid || "").slice(0, 8)) + (a.realm ? " · " + a.realm : ""),
-              fmtBalance(a) + " · 成功 " + (a.success_count || 0) + " 次" +
-                ((a.model_costs || []).length ? " · 台账 " + a.model_costs.length + " 模型" : "") + flags + " " + acts,
-            );
+              act("复活", "revive:" + a.uid);
+            var balance = String(fmtBalance(a)).replace(/^积分\s*/, "").replace(/（[^）]*）/g, "").trim();
+            html +=
+              '<tr class="acc-row" data-i="' + i + '"><td>' + esc(a.nickname || String(a.uid || "").slice(0, 8)) +
+              (a.realm ? ' <span class="k">' + esc(a.realm) + "</span>" : "") + "</td>" +
+              '<td class="num">' + esc(balance) + "</td>" +
+              '<td class="num">' + (a.success_count || 0) + "</td>" +
+              '<td class="num">' + ((a.model_costs || []).length ? (a.model_costs || []).length + " 模型" : "—") + "</td>" +
+              "<td>" + (flags || '<span class="k">正常</span>') + "</td>" +
+              '<td class="acts">' + acts + "</td></tr>" +
+              '<tr class="ledger-row" data-for="' + i + '" hidden><td colspan="6">' + ledgerInline(a) + "</td></tr>";
           });
-          if (adminHint) {
-            html += row("管理端点", '<span class="dot warn"></span>未开启 · 点「开启管理端点并重启网关」');
-          }
+          html += "</tbody></table>";
           el.innerHTML = html;
-          var nodes = el.querySelectorAll(".wbc-act");
-          for (var i = 0; i < nodes.length; i++) nodes[i].addEventListener("click", onAct);
+          Array.prototype.forEach.call(el.querySelectorAll(".acc-row"), function (tr) {
+            tr.style.cursor = "pointer";
+            tr.addEventListener("click", function (event) {
+              if (event.target.closest("[data-act]")) return;
+              var d2 = el.querySelector('.ledger-row[data-for="' + tr.getAttribute("data-i") + '"]');
+              if (d2) d2.hidden = !d2.hidden;
+              tr.classList.toggle("open");
+            });
+          });
+          Array.prototype.forEach.call(el.querySelectorAll(".wbc-act"), function (n) { n.addEventListener("click", onAct); });
         }
 
         // 模型倍率：官方倍率（/v1/models 目录，对齐官方 UI）+ 实测单价（/v1/stats 累计积分÷token）
@@ -515,7 +515,7 @@ export default {
           var el = byId("wbc-rates");
           if (!el) return;
           var statsRows = (statsData && statsData.ok && statsData.stats && statsData.stats.models) || [];
-          var used = {}; // 裸模型名 -> {credit, tokens, requests}
+          var used = {};
           statsRows.forEach(function (m) {
             if (Number(m.total_tokens) > 0) {
               used[String(m.model || "").replace(/^(cn|global):/, "")] = {
@@ -527,70 +527,94 @@ export default {
           });
           var catalog = (modelsData && modelsData.ok && Array.isArray(modelsData.models)) ? modelsData.models : [];
           var bare = function (id) { return String(id || "").replace(/^(cn|global):/, ""); };
-          var mult = function (s) { return String(s || "").replace(/^x/i, "").replace(/\s*credits.*$/i, ""); };
+          var mult = function (x) { return String(x || "").replace(/^x/i, "").replace(/\s*credits.*$/i, ""); };
 
-          var usedRows = [], restRows = [];
-          catalog.forEach(function (mi) {
-            var r = { id: String(mi.id || bare(mi.id)), credits: mult(mi.credits), u: used[bare(mi.id)] || null };
-            (r.u ? usedRows : restRows).push(r);
+          var rows = catalog.map(function (mi) {
+            return { id: mi.id, meta: mi, u: used[bare(mi.id)] || null };
           });
           Object.keys(used).forEach(function (b) {
-            if (!usedRows.some(function (r) { return bare(r.id) === b; })) {
-              usedRows.push({ id: b, credits: "", u: used[b] });
-            }
+            if (!rows.some(function (r) { return bare(r.id) === b; })) rows.push({ id: b, meta: null, u: used[b] });
           });
-          if (!usedRows.length && !restRows.length) {
+          if (!rows.length) {
             el.innerHTML = '<div class="wrc-hint">模型目录不可达 · 稍后重试</div>';
             return;
           }
-          usedRows.sort(function (a, b) { return b.u.credit - a.u.credit; });
-          restRows.sort(function (a, b) { return a.id < b.id ? -1 : a.id > b.id ? 1 : 0; });
+          rows.sort(function (a, b) {
+            if (!!a.u !== !!b.u) return a.u ? -1 : 1;
+            if (a.u && b.u) return b.u.credit - a.u.credit;
+            return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+          });
 
-          function fmtTok(n) {
-            return n >= 1e8 ? (n / 1e8).toFixed(1) + "亿" : (n / 1e4).toFixed(0) + "万";
+          function param(k, v) {
+            if (v == null || v === "") return "";
+            return '<div class="param"><span class="pk">' + esc(k) + '</span><span class="pv">' + esc(String(v)) + "</span></div>";
           }
 
-          var html = '<div class="wrc-hint">官方倍率同官方 UI · 实测 = 累计积分 ÷ token（每千 token 扣分，随缓存命中浮动）</div>';
-          if (usedRows.length) {
-            html += '<table class="wrc-table"><thead><tr>' +
-              "<th>模型</th><th>官方</th><th>实测</th><th>积分</th><th>token</th><th>请求</th>" +
-              "</tr></thead><tbody>";
-            usedRows.forEach(function (r) {
-              html += "<tr><td>" + esc(r.id) + "</td>" +
-                '<td class="num">' + (r.credits ? esc(r.credits) + "x" : "—") + "</td>" +
-                '<td class="num">' + ((r.u.credit / r.u.tokens) * 1000).toFixed(4) + "</td>" +
-                '<td class="num">' + r.u.credit.toFixed(1) + "</td>" +
-                '<td class="num">' + fmtTok(r.u.tokens) + "</td>" +
-                '<td class="num">' + r.u.requests + "</td></tr>";
-            });
-            html += "</tbody></table>";
-          }
-          if (restRows.length) {
-            html += '<div class="wrc-sub">其余模型官方倍率 · ' + restRows.length + " 个未使用</div>";
-            html += '<div class="wrc-chips">';
-            restRows.forEach(function (r) {
-              html += '<span class="wrc-chip">' + esc(r.id) +
-                (r.credits ? " <b>" + esc(r.credits) + "x</b>" : "") + "</span>";
-            });
-            html += "</div>";
-          }
+          var html = '<table class="wrc-table compact model-list"><thead><tr>' +
+            '<th>模型</th><th class="num">官方</th><th class="num">实测/千tok</th><th class="num">请求</th>' +
+            "</tr></thead><tbody>";
+          rows.forEach(function (r, i) {
+            var cred = r.meta ? mult(r.meta.credits) : "";
+            var real = r.u && r.u.tokens ? ((r.u.credit / r.u.tokens) * 1000).toFixed(4) : "—";
+            html +=
+              '<tr class="model-row" data-i="' + i + '"><td>' + esc(r.id) +
+              (r.u ? "" : ' <span class="k">未使用</span>') + "</td>" +
+              '<td class="num">' + (cred ? esc(cred) + "x" : "—") + "</td>" +
+              '<td class="num">' + real + "</td>" +
+              '<td class="num">' + (r.u ? r.u.requests : "—") + "</td></tr>";
+            var m = r.meta || {};
+            html += '<tr class="model-detail" data-for="' + i + '" hidden><td colspan="4"><div class="param-grid">' +
+              param("上下文", m.context_length) +
+              param("最大输出", m.max_output_tokens) +
+              param("推理强度", m.reasoning_effort) +
+              param("图片", m.supports_images ? "支持" : "不支持") +
+              param("工具调用", m.supports_tool_call ? "支持" : "—") +
+              param("vendor", m.vendor || m.owned_by) +
+              (m.description ? '<div class="param wide"><span class="pv">' + esc(m.description) + "</span></div>" : "") +
+              "</div></td></tr>";
+          });
+          html += "</tbody></table>";
           el.innerHTML = html;
+          Array.prototype.forEach.call(el.querySelectorAll(".model-row"), function (tr) {
+            tr.style.cursor = "pointer";
+            tr.addEventListener("click", function () {
+              var d2 = el.querySelector('.model-detail[data-for="' + tr.getAttribute("data-i") + '"]');
+              if (d2) d2.hidden = !d2.hidden;
+              tr.classList.toggle("open");
+            });
+          });
         }
 
         function renderStats(d) {
-          if (!d || !d.ok) return;
+          var el = byId("wbc-stats");
+          if (!el) return;
+          if (!d || !d.ok) {
+            el.innerHTML = '<div class="k">用量统计不可达</div>';
+            return;
+          }
           var t = (d.stats && d.stats.total) || {};
           var successRate = t.requests ? Math.round((t.success / t.requests) * 100) : null;
           var cacheRate = t.prompt_tokens ? Math.round((t.cache_hit_tokens / t.prompt_tokens) * 100) : null;
-          byId("wbc-stats").innerHTML = row(
-            "用量统计",
-            (t.requests != null
-              ? t.requests + " 请求 · 成功率 " + (successRate != null ? successRate + "%" : "—") +
-                " · " + (t.total_tokens / 10000).toFixed(1) + " 万 token" +
-                (cacheRate != null ? " · 缓存命中 " + cacheRate + "%" : "") +
-                " · 均速 " + Math.round(t.tokens_per_sec || 0) + " tok/s"
-              : "—"),
-          );
+          var html = '<div class="stat-strip">' +
+            '<div><b>' + (t.requests != null ? t.requests : "—") + '</b><span>请求</span></div>' +
+            '<div><b>' + (successRate != null ? successRate + "%" : "—") + '</b><span>成功率</span></div>' +
+            '<div><b>' + (t.total_tokens != null ? (t.total_tokens / 10000).toFixed(1) + "万" : "—") + '</b><span>token</span></div>' +
+            '<div><b>' + (cacheRate != null ? cacheRate + "%" : "—") + '</b><span>缓存命中</span></div>' +
+            '<div><b>' + Math.round(t.tokens_per_sec || 0) + '</b><span>tok/s</span></div>' +
+            "</div>";
+          // 按模型的用量，铺在统计条下面，让左栏和右栏高度接近
+          var models = (d.stats && d.stats.models) || [];
+          if (models.length) {
+            var top = models.slice().sort(function (a, b) { return Number(b.total_tokens || 0) - Number(a.total_tokens || 0); }).slice(0, 8);
+            var max = Math.max.apply(null, top.map(function (m) { return Number(m.total_tokens || 0); }).concat([1]));
+            html += '<div class="model-bars"><div class="pblock-head" style="padding-left:0">按模型 token</div>' +
+              top.map(function (m) {
+                var w = Math.max(2, Math.round((Number(m.total_tokens || 0) / max) * 100));
+                return '<div class="mbar"><span class="mono">' + esc(m.model || "—") + '</span>' +
+                  '<i style="width:' + w + '%"></i><b>' + (Number(m.total_tokens || 0) / 10000).toFixed(1) + "万</b></div>";
+              }).join("") + "</div>";
+          }
+          el.innerHTML = html;
         }
 
         async function loadAll() {
@@ -619,7 +643,7 @@ export default {
           var uid = spec.slice(kind.length + 1);
           if (kind === "ledger") {
             var acc = accountsCache.filter(function (a) { return a.uid === uid; })[0] || {};
-            alert("成本台账（每千 token 实测单价，6 小时未更新失效）：\\n" + ledgerText(acc));
+            window.__uiAlert ? window.__uiAlert("提示", "成本台账（每千 token 实测单价，6 小时未更新失效）：\\n" + ledgerText(acc)) : uiAlert("成本台账（每千 token 实测单价，6 小时未更新失效）：\\n" + ledgerText(acc));
             return;
           }
           var label = kind === "disable" ? "停用" : kind === "enable" ? "启用" : "复活";
@@ -632,10 +656,10 @@ export default {
             var d = await r.json();
             if (!d.ok) {
               if (d.error && d.error.indexOf("admin.enabled") >= 0) adminHint = true;
-              alert(label + "失败：" + (d.error || JSON.stringify(d.payload)));
+              window.__uiAlert ? window.__uiAlert("提示", label + "失败：" + (d.error || JSON.stringify(d.payload))) : uiAlert(label + "失败：" + (d.error || JSON.stringify(d.payload)));
             }
           } catch (e) {
-            alert(label + "失败：" + String(e));
+            window.__uiAlert ? window.__uiAlert("提示", label + "失败：" + String(e)) : uiAlert(label + "失败：" + String(e));
           } finally {
             loadAll();
           }
@@ -651,9 +675,9 @@ export default {
             var d = await r.json();
             if (d.ok) {
               adminHint = false;
-              alert(d.changed ? "已开启并重启网关。" : "管理端点原本就已开启，无需改动。");
+              window.__uiAlert ? window.__uiAlert("提示", d.changed ? "已开启并重启网关。" : "管理端点原本就已开启，无需改动。") : uiAlert(d.changed ? "已开启并重启网关。" : "管理端点原本就已开启，无需改动。");
             } else {
-              alert("失败：" + JSON.stringify(d.restart || d.error));
+              window.__uiAlert ? window.__uiAlert("提示", "失败：" + JSON.stringify(d.restart || d.error)) : uiAlert("失败：" + JSON.stringify(d.restart || d.error));
             }
           } finally {
             btn.disabled = false;

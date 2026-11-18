@@ -394,64 +394,28 @@ export default {
     });
 
     registerCard(`
-      <section class="card">
-        <h2>Trae 账号池（插件）</h2>
-        <div class="rows" id="wtr-accounts"><div class="empty">加载中…</div></div>
-        <div class="rows" id="wtr-rates"><div class="empty">模型倍率加载中…</div></div>
-        <div class="actions">
-          <button class="btn primary" type="button" id="wtr-login"><span class="btn-label">登录新账号</span></button>
-          <button class="btn" type="button" id="wtr-credits"><span class="btn-label">积分/签到实查</span></button>
-          <button class="btn" type="button" id="wtr-import-toggle"><span class="btn-label">导入凭证</span></button>
+                  <section class="card">
+        <div class="phead">
+          <h2>Trae 账号池</h2>
+          <div class="phead-sub">账号优先：登录、导入、签到、倍率</div>
         </div>
-        <style>
-          #wtr-rates { max-height: 340px; overflow: auto;
-            scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
-          #wtr-rates::-webkit-scrollbar { width: 6px; }
-          #wtr-rates::-webkit-scrollbar-track { background: transparent; }
-          #wtr-rates::-webkit-scrollbar-button { display: none; }
-          #wtr-rates::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
-          #wtr-rates::-webkit-scrollbar-thumb:hover { background: var(--muted); }
-          #wtr-rates .wtr-hint { color: var(--muted); font-size: 11px; margin: 2px 0 8px; }
-          #wtr-rates table.wtr-table {
-            width: 100%; border-collapse: collapse;
-            font: 12px/1.6 ui-monospace, Consolas, monospace;
-          }
-          #wtr-rates .wtr-table th {
-            position: sticky; top: 0; background: var(--panel);
-            color: var(--muted); font-weight: normal; font-size: 11px;
-            text-align: right; padding: 3px 10px 4px 8px; border-bottom: 1px solid var(--line);
-          }
-          #wtr-rates .wtr-table td {
-            text-align: right; padding: 3px 10px 3px 8px;
-            border-bottom: 1px solid var(--line); color: var(--ink);
-          }
-          #wtr-rates .wtr-table th:first-child, #wtr-rates .wtr-table td:first-child { text-align: left; }
-          #wtr-rates .wtr-table td:nth-child(2) { text-align: left; color: var(--muted); }
-          #wtr-login-box { display: none; margin: 8px 0 0; padding: 10px 12px;
-            background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; }
-          #wtr-login-box.show { display: block; }
-          #wtr-login-box a { color: var(--accent-2); word-break: break-all; }
-          #wtr-login-state { margin-top: 6px; color: var(--muted); font-size: 12px; }
-          #wtr-import-area { display: none; margin: 8px 0 0; }
-          #wtr-import-area.show { display: block; }
-          #wtr-import-area textarea {
-            width: 100%; box-sizing: border-box; min-height: 72px;
-            background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
-            color: var(--ink); font: 12px/1.5 ui-monospace, Consolas, monospace; padding: 8px 10px;
-          }
-          #wtr-import-area .hint { color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
-          #wtr-out {
-            display: none; margin: 8px 0 0; padding: 10px 12px;
-            background: var(--panel-2); border: 1px solid var(--line);
-            border-left: 2px solid var(--accent); border-radius: 8px;
-            color: var(--ink); font: 12px/1.6 ui-monospace, Consolas, monospace;
-            white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow: auto;
-          }
-          #wtr-out.show { display: block; }
-          .wtr-act { cursor: pointer; margin-left: 6px; }
-        </style>
+        <div class="split-2">
+          <div class="pblock pane">
+            <div class="pblock-head">账号 <span class="k">点行看详情</span>
+            <span class="grow"></span>
+            <button class="btn sm primary" type="button" id="wtr-login"><span class="btn-label">登录新账号</span></button>
+            <button class="btn sm" type="button" id="wtr-credits"><span class="btn-label">积分/签到实查</span></button>
+            <button class="btn sm" type="button" id="wtr-import-toggle"><span class="btn-label">导入凭证</span></button>
+          </div>
+          <div class="list-scroll" id="wtr-accounts"><div class="empty">加载中…</div></div>
+        </div>
+          <div class="pblock pane">
+            <div class="pblock-head">模型倍率 <span class="k">点行看参数</span></div>
+            <div class="list-scroll" id="wtr-rates"><div class="empty">模型倍率加载中…</div></div>
+          </div>
+        </div>
         <div id="wtr-login-box">
-          <div>1. 打开授权链接，用 TRAE 账号登录：</div>
+          <div>打开授权链接，用 TRAE 账号登录：</div>
           <div><a id="wtr-login-url" href="#" target="_blank" rel="noopener">(生成中…)</a></div>
           <div id="wtr-login-state">等待发起…</div>
           <div class="actions" style="margin-top: 8px;">
@@ -464,11 +428,24 @@ export default {
           <div class="actions"><button class="btn primary" type="button" id="wtr-import-go"><span class="btn-label">导入</span></button></div>
         </div>
         <pre id="wtr-out"></pre>
+        <style>
+          #wtr-login-box, #wtr-import-area, #wtr-out { display: none; }
+          #wtr-login-box.show, #wtr-import-area.show, #wtr-out.show { display: block; }
+        </style>
       </section>
       <script>
       (function () {
         var BASE = "/api/plugins/trae-accounts";
         function byId(id) { return document.getElementById(id); }
+// 面板里的弹层；没有就退回原生 alert（下面板单独跑时也能用）
+function uiAlert(text) {
+  if (window.__uiAlert) return window.__uiAlert("提示", text);
+  return uiAlert(text);
+}
+async function uiPrompt(label, def) {
+  if (window.__uiPrompt) return await window.__uiPrompt("输入", label, def);
+  return prompt(label, def);
+}
         function esc(s) {
           return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
             return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
@@ -478,7 +455,7 @@ export default {
           return '<div class="row"><div class="k">' + esc(k) + '</div><div class="v">' + v + "</div></div>";
         }
         function act(label, fn) {
-          return '<span class="wtr-act" data-act="' + esc(fn) + '">' + esc(label) + "</span>";
+          return '<button type="button" class="act-link wtr-act" data-act="' + esc(fn) + '">' + esc(label) + "</button>";
         }
         function showOut(text) {
           var out = byId("wtr-out");
@@ -507,39 +484,58 @@ export default {
 
         function render(d) {
           var el = byId("wtr-accounts");
+          if (!el) return;
           if (!d || !d.ok) {
-            el.innerHTML = row("账号池", '<span class="dot err"></span>' + esc((d && d.error) || "加载失败"));
+            el.innerHTML = '<div class="empty">' + esc((d && d.error) || "加载失败") + "</div>";
             return;
           }
           var accs = d.accounts || [];
           accountsCache = accs;
           if (!accs.length) {
-            el.innerHTML = row("账号池", '<span class="dot warn"></span>暂无账号 · 点「登录新账号」发起 OAuth 登录');
+            el.innerHTML = '<div class="empty">暂无账号 · 点「登录新账号」发起 OAuth 登录</div>';
             return;
           }
-          var html = row("账号池", accs.length + " 个账号（" + accs.filter(function (a) { return a.enabled && !a.disabled; }).length + " 个可用）");
-          accs.forEach(function (a) {
+          var html = '<table class="p-table"><thead><tr><th>账号</th><th class="num">积分</th><th>到期</th><th>状态</th><th></th></tr></thead><tbody>';
+          accs.forEach(function (a, i) {
             var chips =
-              (a.disabled ? ' <span class="chip err">硬禁用</span>' : "") +
-              (!a.enabled ? ' <span class="chip err">已停用</span>' : "") +
-              (a.cooling ? ' <span class="chip warn">冷却</span>' : "") +
-              (a.expired_soon ? ' <span class="chip warn">临过期</span>' : "") +
-              (a.err_count ? ' <span class="chip err">错误 ' + a.err_count + "</span>" : "");
+              (a.disabled ? '<span class="chip err">硬禁用</span>' : "") +
+              (!a.enabled ? '<span class="chip err">已停用</span>' : "") +
+              (a.cooling ? '<span class="chip warn">冷却</span>' : "") +
+              (a.expired_soon ? '<span class="chip warn">临过期</span>' : "") +
+              (a.err_count ? '<span class="chip err">错误 ' + a.err_count + "</span>" : "");
             var acts =
               act(a.enabled ? "停用" : "启用", "toggle:" + a.uid) +
               act("改名", "rename:" + a.uid) +
               act("签到", "checkin:" + a.uid) +
-              act("刷新token", "refresh:" + a.uid) +
+              act("刷新", "refresh:" + a.uid) +
               act("凭证", "cred:" + a.uid) +
               act("删除", "delete:" + a.uid);
-            html += row(
-              (a.nickname || String(a.uid).slice(0, 8)) + " · " + String(a.uid).slice(0, 8),
-              [fmtCredits(a.uid), esc(fmtExpire(a.expires_at))].filter(Boolean).join(" · ") + chips + " " + acts,
-            );
+            html +=
+              '<tr class="acc-row" data-i="' + i + '"><td>' + esc(a.nickname || String(a.uid).slice(0, 8)) +
+              ' <span class="k">' + esc(String(a.uid).slice(0, 8)) + "</span></td>" +
+              '<td class="num">' + esc(String(fmtCredits(a.uid)).replace(/^积分\s*/, "")) + "</td>" +
+              "<td>" + esc(fmtExpire(a.expires_at)) + "</td>" +
+              "<td>" + (chips || '<span class="k">正常</span>') + "</td>" +
+              '<td class="acts">' + acts + "</td></tr>" +
+              '<tr class="ledger-row" data-for="' + i + '" hidden><td colspan="5"><div class="param-grid">' +
+              '<div class="param"><span class="pk">uid</span><span class="pv">' + esc(a.uid) + "</span></div>" +
+              '<div class="param"><span class="pk">设备</span><span class="pv">' + esc((a.machine_id || "—").slice(0, 18)) + "</span></div>" +
+              '<div class="param"><span class="pk">授权</span><span class="pv">' + (a.has_auth ? "有" : "无") + "</span></div>" +
+              '<div class="param"><span class="pk">到期</span><span class="pv">' + esc(new Date((a.expires_at || 0) * 1000).toLocaleString("zh-CN")) + "</span></div>" +
+              '<div class="param"><span class="pk">错误</span><span class="pv">' + (a.err_count || 0) + "</span></div>" +
+              "</div></td></tr>";
           });
+          html += "</tbody></table>";
           el.innerHTML = html;
-          var nodes = el.querySelectorAll(".wtr-act");
-          for (var i = 0; i < nodes.length; i++) nodes[i].addEventListener("click", onAct);
+          Array.prototype.forEach.call(el.querySelectorAll(".acc-row"), function (tr) {
+            tr.addEventListener("click", function (event) {
+              if (event.target.closest("[data-act]")) return;
+              var d2 = el.querySelector('.ledger-row[data-for="' + tr.getAttribute("data-i") + '"]');
+              if (d2) d2.hidden = !d2.hidden;
+              tr.classList.toggle("open");
+            });
+          });
+          Array.prototype.forEach.call(el.querySelectorAll(".wtr-act"), function (n) { n.addEventListener("click", onAct); });
         }
 
         async function load() {
@@ -563,16 +559,16 @@ export default {
                 body: JSON.stringify({ uid: uid, enabled: !acc.enabled }),
               });
               var d = await r.json();
-              if (!d.ok) alert("操作失败：" + JSON.stringify(d.payload || d.error));
+              if (!d.ok) window.__uiAlert ? window.__uiAlert("提示", "操作失败：" + JSON.stringify(d.payload || d.error)) : uiAlert("操作失败：" + JSON.stringify(d.payload || d.error));
             } else if (kind === "rename") {
-              var name = prompt("新昵称：", acc.nickname || "");
+              var name = await (window.__uiPrompt ? window.__uiPrompt("新昵称：", acc.nickname || "") : Promise.resolve(prompt("新昵称：", acc.nickname || "")));
               if (name == null) return;
               var r2 = await fetch(BASE + "/patch", {
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ uid: uid, nickname: name }),
               });
               var d2 = await r2.json();
-              if (!d2.ok) alert("改名失败：" + JSON.stringify(d2.payload || d2.error));
+              if (!d2.ok) window.__uiAlert ? window.__uiAlert("提示", "改名失败：" + JSON.stringify(d2.payload || d2.error)) : uiAlert("改名失败：" + JSON.stringify(d2.payload || d2.error));
             } else if (kind === "refresh") {
               ev.target.textContent = "刷新中…";
               var r3 = await fetch(BASE + "/refresh", {
@@ -580,7 +576,7 @@ export default {
                 body: JSON.stringify({ uid: uid }),
               });
               var d3 = await r3.json();
-              if (!d3.ok) alert("刷新失败：" + JSON.stringify(d3.payload || d3.error));
+              if (!d3.ok) window.__uiAlert ? window.__uiAlert("提示", "刷新失败：" + JSON.stringify(d3.payload || d3.error)) : uiAlert("刷新失败：" + JSON.stringify(d3.payload || d3.error));
             } else if (kind === "checkin") {
               ev.target.textContent = "签到中…";
               var r6 = await fetch(BASE + "/checkin", {
@@ -590,7 +586,7 @@ export default {
               var d6 = await r6.json();
               var p6 = (d6.payload && d6.payload.results && d6.payload.results[0]) || {};
               if (!d6.ok || p6.error) {
-                alert("签到失败：" + (p6.error || JSON.stringify(d6.payload || d6.error)));
+                window.__uiAlert ? window.__uiAlert("提示", "签到失败：" + (p6.error || JSON.stringify(d6.payload || d6.error))) : uiAlert("签到失败：" + (p6.error || JSON.stringify(d6.payload || d6.error)));
               } else {
                 var now6 = new Date().toLocaleTimeString("zh-CN", { hour12: false });
                 showOut("[" + now6 + "]\\n" + (p6.nickname || uid) + "：" +
@@ -609,10 +605,10 @@ export default {
                 body: JSON.stringify({ uid: uid }),
               });
               var d4 = await r4.json();
-              if (!d4.ok) alert("删除失败：" + JSON.stringify(d4.payload || d4.error));
+              if (!d4.ok) window.__uiAlert ? window.__uiAlert("提示", "删除失败：" + JSON.stringify(d4.payload || d4.error)) : uiAlert("删除失败：" + JSON.stringify(d4.payload || d4.error));
             }
           } catch (e) {
-            alert("操作失败：" + String(e));
+            window.__uiAlert ? window.__uiAlert("提示", "操作失败：" + String(e)) : uiAlert("操作失败：" + String(e));
           } finally {
             load();
           }
@@ -699,7 +695,7 @@ export default {
             var r = await fetch(BASE + "/credits", { cache: "no-store" });
             var d = await r.json();
             if (!d.ok) {
-              if (!silent) alert("查询失败：" + (d.error || ""));
+              if (!silent) window.__uiAlert ? window.__uiAlert("提示", "查询失败：" + (d.error || "")) : uiAlert("查询失败：" + (d.error || ""));
               return;
             }
             (d.credits || []).forEach(function (c) {
@@ -737,7 +733,7 @@ export default {
 
         async function doImport() {
           var text = byId("wtr-import-text").value.trim();
-          if (!text) { alert("请先粘贴凭证内容"); return; }
+          if (!text) { window.__uiAlert ? window.__uiAlert("提示", "请先粘贴凭证内容") : uiAlert("请先粘贴凭证内容"); return; }
           var btn = byId("wtr-import-go");
           btn.disabled = true;
           try {
@@ -751,7 +747,7 @@ export default {
               byId("wtr-import-area").className = "";
               showOut("导入成功：" + JSON.stringify(d.payload, null, 2));
             } else {
-              alert("导入失败：" + JSON.stringify(d.payload || d.error));
+              window.__uiAlert ? window.__uiAlert("提示", "导入失败：" + JSON.stringify(d.payload || d.error)) : uiAlert("导入失败：" + JSON.stringify(d.payload || d.error));
             }
           } finally {
             btn.disabled = false;
@@ -776,12 +772,18 @@ export default {
               var member = m.memberRate != null
                 ? Number(m.memberRate).toFixed(2) + "x" + (m.matched ? " ✓" : "")
                 : "—";
-              html += "<tr><td>" + esc(m.id) + "</td><td>" + esc(m.name || "—") +
+              html += '<tr class="rate-row" data-model="trae/' + esc(m.id) + '" title="点击看这个模型的上游参数"><td>' + esc(m.id) + "</td><td>" + esc(m.name || "—") +
                 '</td><td class="num">' + Number(m.rate).toFixed(2) + "x</td>" +
                 '<td class="num">' + member + "</td></tr>";
             });
             html += "</tbody></table>";
             el.innerHTML = html;
+            Array.prototype.forEach.call(el.querySelectorAll(".rate-row"), function (node) {
+              node.style.cursor = "pointer";
+              node.addEventListener("click", function () {
+                if (window.__uiModelInfo) window.__uiModelInfo(node.getAttribute("data-model"));
+              });
+            });
           } catch (e) {
             el.innerHTML = row("模型倍率", esc(String(e)));
           }

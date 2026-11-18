@@ -724,3 +724,87 @@ Claude 侧不走 Codex 的 TOML，而是 JSON `settings_config`。仓库提供 `
 ## 免责声明
 
 非官方本机互操作实验项目，与小米 / MiMo 或 OpenAI 无关。内部接口与订阅能力可能随客户端版本变化，使用风险由使用者自行判断。
+
+## 2.9 多上游路由（可选，参考 magpie）
+
+### 别名：开多上游后旧模型名照样能用
+
+开了多上游，模型名会变成 `provider/model`（如 `wb/cn:deepseek-v4.1-flash`）。如果你不想改 Codex 的配置，在路由页的「别名」区点 **按当前模型自动生成**，它会把每个裸模型名映射到 `provider/model`，旧写法继续有效。
+
+```json
+"aliases": { "cn:deepseek-v4.1-flash": "wb/cn:deepseek-v4.1-flash" }
+```
+
+> 这一步是必须的：多上游模式下裸模型名会被判成"没有上游声明能服务它"，直接 503。
+
+### 页面合并：没有单独的「上游」页
+
+开了多上游之后，"切换上游"这个动作被路由取代了，所以原来那三张切换卡的位置改成了：
+
+- 路由页顶部一条**运行条**：bridge 状态 / pid / 上游 / 模型数 + 启动网关、启动、重启、停止；
+- 只有**没开多上游**时才显示三张切换卡（单上游模式仍然需要它），标题直接写"单上游模式 · 切换会重启 bridge"；
+- `#/upstreams` 这个旧链接会自动跳到路由页。
+
+### 在面板里开（推荐）
+
+不用手写 JSON，也不用重启 bridge：
+
+1. 打开面板 → **路由** 页，最下面是「路由配置」；
+2. 上游行里填 base 和 token 文件（mimo 的 base 留空 = 端口自动发现），「加一家」可以再加；
+3. 路由组里填成员（`provider/model`）、选 `routing`（smart/order/rotate/usage/pace/weight/fast）和 `stays`；
+4. **保存** 写 `upstreams.json`，**启用多上游** 让它生效 —— bridge 每 250ms 看一次文件 mtime，**不用重启**；
+5. 额度那几行写 `quota.json`（已用 % + 几小时后重置），曲线和排序立刻用上；
+6. **停用** 把 `upstreams.json` 改名成 `upstreams.disabled.json`，回到单上游模式。
+
+对应的接口（面板本地）：`GET/POST /api/routing`、`POST /api/routing/enable|disable`、`POST /api/quota`、`GET /api/history`。
+写文件是原子的（先 `.tmp` 再 rename），解析不过直接 400 并列出每条错误，不会把坏配置落到磁盘。
+
+---
+
+### 手工配置
+
+默认不启用：**没有 `upstreams.json` 时，bridge 的行为和 2.8 完全一致**（单上游、启动参数决定）。
+把 `upstreams.example.json` 复制成 `upstreams.json` 并重启 bridge，就切换成"每请求路由"。
+
+```text
+upstreams.json   哪几家上游、各自 token 文件、能力表、路由组
+quota.json       额度账本快照（可选；没有就视为"额度未知"）
+hooks/           请求钩子（可选，目前只有 before-request）
+router.mjs       排序算法（smart/order/rotate/usage/pace/weight/fast）
+upstream-registry.mjs  注册表解析 + 模型 ID 解析
+bridge-routing.mjs     把上面几块接成运行时
+```
+
+开起来之后：
+
+- 模型 ID 变成 `provider/model`（如 `wb/cn:glm-4.6`）或 `group/<id>`；
+- `/v1/models` 会合并各家列表并加上上游前缀，同时列出 `group/...`；
+- `/status` 多出 `routing` 字段（上游、健康、路由组、额度），面板的"路由"卡就是它；
+- 一家 5xx/429 **或连不上**会进 resting（默认 30 秒），这次请求就地换下一家重试（换家时模型 ID 跟着换）；**流一旦开始写就不换**；
+- `previous_response_id` 的续写会钉在当初那家上游上（否则上下文和缓存都对不上）；
+- 额度取 `quota.json` 里最满窗口的 `share` + `resetsAt`，90% 让位、98% 视为满。
+
+自检：`node doctor.mjs` 会多两条 `upstream_registry` / `quota_ledger`（都不是必过项）。
+
+设计说明与取舍见 `docs/architecture-borrowing.md`，面板视觉见 `docs/ui-magpie-reference.md`。
+
+## 2.10 面板 UI（照着 magpie 重写）
+
+```text
+panel-ui/shell.html   外壳 + 18 个内联图标 symbol
+panel-ui/app.css      设计系统 v2：13px/40px 行、发丝边框、单一靛蓝、图表、虚拟列表
+panel-ui/app.js       hash 路由、8 秒轮询、动作、自检
+```
+
+- 页面：概览 / 请求 / 上游 / 路由组 / 模型 / 配置，插件每个一页
+- 概览顶部是**实时拓扑**（接入方 → 模型桥 → 上游）：接入方是从请求头**认出来的**（DSH / Codex / Claude Code …），不是写死的
+- 路由组页有**路由过程图**：接入方 / 桥与模式 / 成员实时状态 + “最近一次路由”的决策理由
+- 请求页读 bridge 的 `/status.metrics.requests.recent`（200 条环形缓冲，只记元信息）
+- 路由页画每个上游的 24 小时额度曲线，数据来自面板自己记的 `panel-history.json`
+- 模型页是窗口化虚拟列表（98 个模型只渲染 ~20 行）
+- 主题三态（跟随/浅色/深色）；改 CSS 刷新页面即生效（`buildHtml` 每请求重建 + mtime 缓存）
+- 交互：路由页图表可悬停（竖线 + 浮层）、时间窗 1h/24h/7d；请求行点开看详情
+- 快捷键：`g`+`o/q/u/r/m/c` 跳页、`r` 刷新、`/` 搜索、`?` 帮助、`Esc` 关闭
+- 自检：`http://127.0.0.1:8791/?selftest=1`（会连悬停/快捷键/详情行一起测）；截图：`reports/ui/`
+
+详细设计与验证见 `docs/ui-magpie-reference.md`。

@@ -200,32 +200,39 @@ export default {
     });
 
     registerCard(`
-      <section class="card">
-        <h2>WorkBuddy 自动任务（插件）</h2>
-        <div class="rows" id="wbt-tasks"><div class="empty">加载中…</div></div>
-        <div class="actions">
-          <button class="btn" type="button" id="wbt-restart"><span class="btn-label">重启网关（应用开关）</span></button>
+            <section class="card">
+        <div class="phead">
+          <h2>WorkBuddy 自动任务</h2>
+          <div class="phead-sub">签到 / 成长任务 · 改开关后需重启网关生效</div>
         </div>
-        <style>
-          #wbt-out {
-            display: none; margin: 8px 0 0; padding: 10px 12px;
-            background: var(--panel-2); border: 1px solid var(--line);
-            border-left: 2px solid var(--accent); border-radius: 8px;
-            color: var(--ink); font: 12px/1.6 ui-monospace, Consolas, monospace;
-            white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow: auto;
-          }
-          #wbt-out.show { display: block; }
-        </style>
-        <div class="actions" style="margin-top: 8px;">
+        <div class="pblock">
+          <div class="pblock-head">定时任务</div>
+          <div class="list-scroll" id="wbt-tasks"><div class="empty">加载中…</div></div>
+        </div>
+        <pre id="wbt-out"></pre>
+        <div class="card-foot">
+          <button class="btn" type="button" id="wbt-restart"><span class="btn-label">重启网关（应用开关）</span></button>
           <button class="btn" type="button" id="wbt-dry"><span class="btn-label">查询成长任务 (dry-run)</span></button>
           <button class="btn danger" type="button" id="wbt-run"><span class="btn-label">完成+领奖 (--yes)</span></button>
         </div>
-        <pre id="wbt-out"></pre>
+        <style>
+          #wbt-out { display: none; }
+          #wbt-out.show { display: block; }
+        </style>
       </section>
       <script>
       (function () {
         var BASE = "/api/plugins/workbuddy-tasks";
         function byId(id) { return document.getElementById(id); }
+// 面板里的弹层；没有就退回原生 alert（下面板单独跑时也能用）
+function uiAlert(text) {
+  if (window.__uiAlert) return window.__uiAlert("提示", text);
+  return uiAlert(text);
+}
+async function uiPrompt(label, def) {
+  if (window.__uiPrompt) return await window.__uiPrompt("输入", label, def);
+  return prompt(label, def);
+}
         function esc(s) {
           return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
             return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
@@ -297,10 +304,10 @@ export default {
               restartNeeded = true;
               renderTasks(d);
             } else {
-              alert(d.error || "切换失败");
+              window.__uiAlert ? window.__uiAlert("提示", d.error || "切换失败") : uiAlert(d.error || "切换失败");
             }
           } catch (e) {
-            alert("切换失败：" + String(e));
+            window.__uiAlert ? window.__uiAlert("提示", "切换失败：" + String(e)) : uiAlert("切换失败：" + String(e));
           }
         }
 
@@ -320,9 +327,9 @@ export default {
             var d = await r.json();
             restartNeeded = false;
             renderTasks(d);
-            if (!d.ok) alert("网关重启异常：" + (d.detail || "healthz 未就绪"));
+            if (!d.ok) window.__uiAlert ? window.__uiAlert("提示", "网关重启异常：" + (d.detail || "healthz 未就绪")) : uiAlert("网关重启异常：" + (d.detail || "healthz 未就绪"));
           } catch (e) {
-            alert("重启失败：" + String(e));
+            window.__uiAlert ? window.__uiAlert("提示", "重启失败：" + String(e)) : uiAlert("重启失败：" + String(e));
           } finally {
             busy(btn, false, "重启网关（应用开关）");
           }
