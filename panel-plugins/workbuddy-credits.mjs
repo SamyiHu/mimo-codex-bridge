@@ -206,73 +206,181 @@ export default {
       return json(res, 200, { ok: restart.ok, changed, restart });
     });
 
-    // ── WorkBuddy OAuth 登录闭环（驱动网关目录预构建的 login.exe）──
-    // url 子命令：POST /v2/plugin/auth/state 拿授权链接（state 落 %TEMP%，无 PKCE）
-    registerRoute("POST", "/login/start", async (req, res, { json, readBody }) => {
-      const s = settings();
-      const body = await readBody(req);
-      const realm = body.realm === "global" ? "global" : "cn";
-      const exe = path.join(s.gatewayDir, "login.exe");
-      if (!fs.existsSync(exe)) {
-        return json(res, 200, { ok: false, error: `找不到 ${exe}` });
-      }
-      const r = await runCommand(exe, [`--realm=${realm}`, "url"], {
-        cwd: s.gatewayDir,
-        timeoutMs: 30000,
-      });
-      if (!r.ok) {
-        return json(res, 200, {
-          ok: false,
-          error: "获取授权链接失败：" + (r.stderr || r.stdout || "").slice(-200),
-        });
-      }
-      const authUrl = r.stdout.trim().split(/\r?\n/).filter(Boolean).pop() || "";
-      if (!/^https?:\/\//.test(authUrl)) {
-        return json(res, 200, { ok: false, error: `输出异常：${r.stdout.slice(0, 200)}` });
-      }
-      return json(res, 200, { ok: true, realm, authUrl });
-    });
+    // ── WorkBuddy OAuth 登录闭环 ──
+    // 主路（默认）：面板直连腾讯 OAuth。2026-10 实测服务端要求「platform=workbuddy +
+    // WorkBuddy 桌面 UA」同时满足才发新登录页；网关自带 login.exe 走老 CLI 通道
+    // （platform=CLI），拿到的是旧链接，扫码后常常拿不到 token —— 这是「登录新账号」
+    // 一直停在等待中的根因。
+    //   ① POST <authBase>/v2/plugin/auth/state?platform=… → state + authUrl
+    //   ② 浏览器打开 authUrl 完成扫码/登录
+    //   ③ GET  <authBase>/v2/plugin/auth/token?state=…（code=11217 表示登录未完成）
+    //   ④ GET  <authBase>/v2/plugin/login/account?state=…（带 Bearer）取 uid/nickname
+    //   ⑤ 落盘 auths/workbuddy-<uid>.json（网关 StartAuthDirWatch 自动入池，无需重启）
+    // 备路：主路请求失败时自动回退网关目录的 login.exe（--realm=xx url|poll）。
+    const WB_REALMS = {
+      cn: {
+        authBase: "https://copilot.tencent.com",
+        loginBase: "https://www.workbuddy.cn",
+        platform: "workbuddy",
+        webOrigin: "https://www.codebuddy.cn",
+        accountPath: "/v2/plugin/login/account",
+        ua: "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0",
+        clientVersion: "5.8.3",
+        domain: "www.codebuddy.cn",
+        intl: false,
+      },
+      global: {
+        authBase: "https://www.workbuddy.ai",
+        loginBase: "https://www.workbuddy.ai",
+        platform: "workbuddy-ai",
+        webOrigin: "https://www.workbuddy.ai",
+        accountPath: "/v2/plugin/auth/account",
+        ua: "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/2.137.1",
+        clientVersion: "5.7.6",
+        domain: "www.workbuddy.ai",
+        intl: true,
+      },
+    };
+    const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+    const pendingLogins = new Map();
 
-    // poll 子命令：GET token + account；成功后落盘 auths/workbuddy-<uid>.json（网关
-    // StartAuthDirWatch 自动入池，无需重启），CN 域顺带补一次幂等签到
-    registerRoute("POST", "/login/poll", async (req, res, { json, readBody }) => {
-      const s = settings();
-      const body = await readBody(req);
-      const realm = body.realm === "global" ? "global" : "cn";
-      const exe = path.join(s.gatewayDir, "login.exe");
-      if (!fs.existsSync(exe)) {
-        return json(res, 200, { ok: false, error: `找不到 ${exe}` });
+    function wbRealmCfg(realm) {
+      return WB_REALMS[realm === "global" ? "global" : "cn"];
+    }
+
+    function wbHeaders(cfg, extra) {
+      const headers = Object.assign(
+        {
+          "User-Agent": cfg.ua,
+          Accept: "application/json, text/plain, */*",
+          "X-Requested-With": "XMLHttpRequest",
+          Origin: cfg.webOrigin,
+          Referer: cfg.webOrigin + "/",
+        },
+        extra || {},
+      );
+      if (cfg.intl) {
+        headers["X-No-Authorization"] = "true";
+        headers["X-No-User-Id"] = "true";
+        headers["X-No-Enterprise-Id"] = "true";
+        headers["X-No-Department-Info"] = "true";
       }
-      const r = await runCommand(exe, [`--realm=${realm}`, "poll"], {
-        cwd: s.gatewayDir,
-        timeoutMs: 30000,
+      return headers;
+    }
+
+    function digAny(node, keys, depth) {
+      const level = depth || 0;
+      if (!node || typeof node !== "object" || level > 4) return undefined;
+      for (const key of keys) {
+        const v = node[key];
+        if (v !== undefined && v !== null && v !== "") return v;
+      }
+      for (const v of Object.values(node)) {
+        const found = digAny(v, keys, level + 1);
+        if (found !== undefined) return found;
+      }
+      return undefined;
+    }
+
+    function jwtClaims(token) {
+      try {
+        const part = String(token || "").split(".")[1];
+        if (!part) return null;
+        const json = Buffer.from(part.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+        return JSON.parse(json);
+      } catch {
+        return null;
+      }
+    }
+
+    async function wbAuthState(cfg) {
+      const res = await fetch(
+        cfg.authBase + "/v2/plugin/auth/state?platform=" + encodeURIComponent(cfg.platform),
+        {
+          method: "POST",
+          headers: wbHeaders(cfg, { "Content-Type": "application/json" }),
+          body: "{}",
+          signal: AbortSignal.timeout(15000),
+        },
+      );
+      const body = await res.json().catch(() => null);
+      const data = body && body.data && typeof body.data === "object" ? body.data : body;
+      const state = String((data && (data.state || data.authState || data.auth_state)) || "").trim();
+      if (!state) {
+        throw new Error("auth/state 未返回 state（HTTP " + res.status + "）：" + JSON.stringify(body).slice(0, 160));
+      }
+      let authUrl = String((data && (data.authUrl || data.auth_url)) || "").trim();
+      if (!/^https?:\/\//.test(authUrl)) {
+        authUrl =
+          cfg.loginBase +
+          "/login?platform=" +
+          encodeURIComponent(cfg.platform) +
+          "&state=" +
+          state +
+          "&version=" +
+          cfg.clientVersion;
+      }
+      return { state: state, authUrl: authUrl };
+    }
+
+    async function wbTokenPoll(cfg, state) {
+      const res = await fetch(cfg.authBase + "/v2/plugin/auth/token?state=" + encodeURIComponent(state), {
+        headers: wbHeaders(cfg),
+        signal: AbortSignal.timeout(15000),
       });
-      if (!r.ok) {
-        // 未完成登录时 token 端点会报错——返回 retry 让前端继续轮询
-        return json(res, 200, { ok: false, retry: true, detail: (r.stderr || r.stdout || "").slice(-160) });
+      const body = await res.json().catch(() => null);
+      const accessToken = String(digAny(body, ["accessToken", "access_token"]) || "");
+      if (!accessToken) {
+        const msg = (body && (body.msg || body.message)) || "HTTP " + res.status;
+        return { ok: false, detail: String(msg).slice(0, 160) };
       }
-      const cred = parseJsonLoose(r.stdout);
-      if (!cred?.access_token || !cred?.uid) {
-        return json(res, 200, { ok: false, retry: true, detail: "凭证字段缺失，等待登录完成" });
-      }
-      const expiresAt = Math.floor(Date.now() / 1000) + Number(cred.expires_in || 0);
-      const authFile = path.join(s.gatewayDir, "auths", `workbuddy-${cred.uid}.json`);
+      const claims = jwtClaims(accessToken) || {};
+      let expiresIn = Number(digAny(body, ["expiresIn", "expires_in"]) || 0) || 0;
+      if (!expiresIn && claims.exp) expiresIn = Math.max(0, Number(claims.exp) - Math.floor(Date.now() / 1000));
+      return {
+        ok: true,
+        accessToken: accessToken,
+        refreshToken: String(digAny(body, ["refreshToken", "refresh_token"]) || ""),
+        expiresIn: expiresIn,
+      };
+    }
+
+    async function wbAccount(cfg, state, token) {
+      const res = await fetch(cfg.authBase + cfg.accountPath + "?state=" + encodeURIComponent(state), {
+        headers: wbHeaders(cfg, { Authorization: "Bearer " + token }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const body = await res.json().catch(() => null);
+      const claims = jwtClaims(token) || {};
+      return {
+        uid: String(digAny(body, ["uid", "userId", "user_id"]) || claims.sub || ""),
+        nickname: String(digAny(body, ["nickname", "nickName", "name"]) || ""),
+        enterpriseId: String(digAny(body, ["enterpriseId", "enterprise_id"]) || ""),
+      };
+    }
+
+    async function commitWorkbuddyCredential(cred, realm) {
+      const s = settings();
+      const authDir = path.join(s.gatewayDir, "auths");
+      fs.mkdirSync(authDir, { recursive: true });
+      const authFile = path.join(authDir, "workbuddy-" + cred.uid + ".json");
       const existed = fs.existsSync(authFile);
+      const expiresAt = Math.floor(Date.now() / 1000) + Number(cred.expires_in || 0);
       fs.writeFileSync(
         authFile,
         JSON.stringify(
           {
             account: {
-              uid: cred.uid,
               enterpriseId: cred.enterprise_id || "",
               nickname: cred.nickname || "",
+              uid: cred.uid,
             },
             auth: {
               accessToken: cred.access_token,
-              refreshToken: cred.refresh_token || "",
-              expiresAt,
               domain: cred.domain || "",
-              realm,
+              expiresAt: expiresAt,
+              realm: realm,
+              refreshToken: cred.refresh_token || "",
             },
           },
           null,
@@ -282,11 +390,11 @@ export default {
       );
 
       // CN 域首签（幂等，失败不阻塞入池）
-      let checkin = "global 跳过";
+      let checkin = realm === "cn" ? "" : "global 跳过";
       if (realm === "cn") {
         try {
           const headers = {
-            Authorization: `Bearer ${cred.access_token}`,
+            Authorization: "Bearer " + cred.access_token,
             Accept: "application/json",
             "Content-Type": "application/json",
             "X-User-Id": cred.uid,
@@ -298,22 +406,123 @@ export default {
           if (cred.domain) headers["X-Domain"] = cred.domain;
           const cr = await fetchJson("https://www.codebuddy.cn/v2/billing/meter/daily-checkin", {
             method: "POST",
-            headers,
+            headers: headers,
             body: "{}",
           }, 15000).catch(() => null);
-          const payload = cr?.payload;
-          checkin = payload?.msg || payload?.data?.message || (cr?.ok ? "成功" : "已签到/无返回");
+          const payload = cr && cr.payload;
+          checkin = (payload && (payload.msg || (payload.data && payload.data.message))) || (cr && cr.ok ? "成功" : "已签到/无返回");
         } catch {
           checkin = "签到请求失败（不影响入池）";
         }
       }
+      return { existed: existed, checkin: checkin };
+    }
 
+    registerRoute("POST", "/login/start", async (req, res, { json, readBody }) => {
+      const s = settings();
+      const body = await readBody(req);
+      const realm = body.realm === "global" ? "global" : "cn";
+      const cfg = wbRealmCfg(realm);
+
+      // 主路：面板直连腾讯 OAuth（新登录页要求 platform=workbuddy + 桌面 UA）
+      try {
+        const started = await wbAuthState(cfg);
+        pendingLogins.set(realm, { state: started.state, authUrl: started.authUrl, at: Date.now(), mode: "native" });
+        return json(res, 200, { ok: true, realm: realm, authUrl: started.authUrl, mode: "native" });
+      } catch (err) {
+        const nativeError = String(err && err.message ? err.message : err);
+        // 备路：网关目录的 login.exe
+        const exe = path.join(s.gatewayDir, "login.exe");
+        if (!fs.existsSync(exe)) {
+          return json(res, 200, { ok: false, mode: "native", error: "直连 OAuth 失败：" + nativeError + "；且找不到 " + exe });
+        }
+        const r = await runCommand(exe, ["--realm=" + realm, "url"], { cwd: s.gatewayDir, timeoutMs: 30000 });
+        if (!r.ok) {
+          return json(res, 200, {
+            ok: false,
+            mode: "cli",
+            error: "直连 OAuth 失败：" + nativeError + "；login.exe 也失败：" + (r.stderr || r.stdout || "").slice(-200),
+          });
+        }
+        const authUrl = r.stdout.trim().split(/\r?\n/).filter(Boolean).pop() || "";
+        if (!/^https?:\/\//.test(authUrl)) {
+          return json(res, 200, { ok: false, mode: "cli", error: "login.exe 输出异常：" + r.stdout.slice(0, 200) });
+        }
+        pendingLogins.set(realm, { state: "", authUrl: authUrl, at: Date.now(), mode: "cli" });
+        return json(res, 200, { ok: true, realm: realm, authUrl: authUrl, mode: "cli", note: "主路失败已回退 login.exe：" + nativeError });
+      }
+    });
+
+    registerRoute("POST", "/login/poll", async (req, res, { json, readBody }) => {
+      const s = settings();
+      const body = await readBody(req);
+      const realm = body.realm === "global" ? "global" : "cn";
+      const cfg = wbRealmCfg(realm);
+      const pending = pendingLogins.get(realm) || null;
+
+      if (pending && Date.now() - pending.at > LOGIN_TIMEOUT_MS) {
+        pendingLogins.delete(realm);
+        return json(res, 200, { ok: false, expired: true, error: "登录已超时（5 分钟），请重新发起" });
+      }
+
+      let cred = null;
+      let mode = pending ? pending.mode : "cli";
+
+      if (pending && pending.mode === "native") {
+        let tok;
+        try {
+          tok = await wbTokenPoll(cfg, pending.state);
+        } catch (err) {
+          return json(res, 200, { ok: false, retry: true, detail: "轮询异常：" + String(err && err.message ? err.message : err) });
+        }
+        if (!tok.ok) return json(res, 200, { ok: false, retry: true, detail: tok.detail });
+        const acct = await wbAccount(cfg, pending.state, tok.accessToken).catch(() => null);
+        if (!acct || !acct.uid) {
+          return json(res, 200, { ok: false, retry: true, detail: "已拿到 token，但取账号资料失败（" + cfg.accountPath + "）" });
+        }
+        cred = {
+          access_token: tok.accessToken,
+          refresh_token: tok.refreshToken,
+          expires_in: tok.expiresIn,
+          uid: acct.uid,
+          nickname: acct.nickname,
+          enterprise_id: acct.enterpriseId,
+          domain: cfg.domain,
+        };
+        pendingLogins.delete(realm);
+      } else {
+        const exe = path.join(s.gatewayDir, "login.exe");
+        if (!fs.existsSync(exe)) {
+          return json(res, 200, { ok: false, error: "找不到 " + exe + "，请点「登录新账号」重新发起" });
+        }
+        const r = await runCommand(exe, ["--realm=" + realm, "poll"], { cwd: s.gatewayDir, timeoutMs: 30000 });
+        if (!r.ok) {
+          return json(res, 200, { ok: false, retry: true, detail: (r.stderr || r.stdout || "").slice(-160) });
+        }
+        const parsed = parseJsonLoose(r.stdout);
+        if (!parsed || !parsed.access_token || !parsed.uid) {
+          return json(res, 200, { ok: false, retry: true, detail: "凭证字段缺失，等待登录完成" });
+        }
+        cred = {
+          access_token: parsed.access_token,
+          refresh_token: parsed.refresh_token || "",
+          expires_in: parsed.expires_in || 0,
+          uid: parsed.uid,
+          nickname: parsed.nickname || "",
+          enterprise_id: parsed.enterprise_id || "",
+          domain: parsed.domain || "",
+        };
+        if (pending) pendingLogins.delete(realm);
+      }
+
+      const result = await commitWorkbuddyCredential(cred, realm);
       return json(res, 200, {
         ok: true,
         uid: cred.uid,
         nickname: cred.nickname || "",
-        action: existed ? "覆盖更新" : "新增",
-        checkin,
+        action: result.existed ? "覆盖更新" : "新增",
+        checkin: result.checkin,
+        mode: mode,
         at: new Date().toISOString(),
       });
     });

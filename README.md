@@ -13,6 +13,29 @@ Codex ── bridge-secret ──▶ model-bridge (127.0.0.1:8788)
 
 当前版本：**2.8.0**。项目仅监听 `127.0.0.1`。MiMo Desktop 与 WorkBuddy 的内部接口都不是稳定公开接口，客户端升级后可能需要再次适配。
 
+## 唯一入口：`mimo.cmd`
+
+根目录只有一个启动入口 **`mimo.cmd`**（其余脚本都在 `scripts/` 里，不需要关心）。
+
+```text
+mimo                # 双击 = 交互菜单（启动 / 重启 / 停止 / 状态 / 日志 / 自检）
+mimo start          # 启动 bridge + 控制面板，并打开浏览器（默认上游 workbuddy）
+mimo workbuddy      # 同上，显式指定 WorkBuddy 上游
+mimo trae           # 以 TRAE 上游启动（需先部署 trae2api 到 %USERPROFILE%\.trae2api）
+mimo stop           # 停止面板 + bridge
+mimo restart
+mimo status         # 端口 / 健康 / 账号池 / 当前并发上限
+mimo logs           # 运行日志尾部
+mimo doctor         # doctor.mjs 自检
+powershell -File .\scripts\install-startup.ps1          # 开机自启（单独脚本，主入口不碰启动目录）
+powershell -File .\scripts\install-startup.ps1 -Remove   # 移除自启
+```
+
+- 默认上游是 **workbuddy**（`http://127.0.0.1:7863`，raw 模式）；MiMo 上游保留但不作为默认（无套餐）。
+- 旧的 `启动模型桥.bat` / `启动 MiMo 桥.bat` / `打开控制面板.bat` 已归档到 `scripts/legacy/`，内容变成转发到 `mimo.cmd` 的壳，双击仍可用。
+- 并发口径：`MIMO_BRIDGE_MAX_CONCURRENT` 是**单账号**额度（默认 8），账号池扩展开启时实际上限 = 该值 × 网关可用账号数。
+- 杀软提示（Kaspersky `PDM:Trojan.Win32.Generic` 等）：`mimo.cmd/scripts/mimo.ps1` 是纯启动脚本，本身不含恶意代码；杀软是在拦"拉起子进程 / 写启动目录"这类行为。主入口已去掉 WMI 建进程与启动目录写入，自启改成单独脚本；如仍被拦，把项目目录加入信任即可。
+
 ## 两套凭据
 
 升级后不再让 Codex 直接持有 MiMo 引擎令牌：
@@ -90,7 +113,7 @@ powershell -File .\model-bridge.ps1 native-probe
 
 ## 2.5 启动、配置边界与上下文修复
 
-- 唯一推荐启动入口是 `启动模型桥.bat`；它只初始化 bridge 凭据并启动服务，不修改 Codex 的 model 或模型目录。
+- 唯一推荐启动入口是根目录的 `mimo.cmd`（旧 `启动模型桥.bat` 已归档到 `scripts/legacy/`，仅作兼容转发）；它只初始化 bridge 凭据并启动服务，不修改 Codex 的 model 或模型目录。
 - cc-switch 是一等配置路径。bridge 只提供 `model_providers.mimo` / `model_providers.workbuddy` 连接能力，模型继续由 cc-switch / 用户管理。
 - 新增可选 `configure-codex`：直接写 Codex provider，但默认仍不改 `model`、`model_catalog_json`；`restore-codex` 可恢复原配置。
 - 流式请求会向 MiMo 要求最终 usage chunk，Codex 的上下文统计优先使用上游真实 `prompt/completion/total_tokens`。
@@ -109,7 +132,7 @@ powershell -File .\model-bridge.ps1 native-probe
 
 ## 快速开始
 
-双击 `启动模型桥.bat`。它只做三件事：生成/复用凭据、启动 bridge、显示状态。默认使用 MiMo；命令行执行 `启动模型桥.bat workbuddy` 可启动 WorkBuddy 模式，`启动模型桥.bat workbuddy raw` 显式启用 Raw Chat。
+双击 `mimo.cmd`（或命令行 `mimo start`）。它只做三件事：生成/复用凭据、启动 bridge 与面板、显示状态。默认使用 MiMo；命令行执行 `启动模型桥.bat workbuddy` 可启动 WorkBuddy 模式，`启动模型桥.bat workbuddy raw` 显式启用 Raw Chat。
 
 ```powershell
 powershell -File .\model-bridge.ps1 setup
@@ -266,6 +289,22 @@ copilot.tencent.com
 仓库已删除，因此新部署应使用该发布包中的源码。bridge 不复制账号池，只把它的
 OpenAI-compatible Chat API 作为可选 upstream。
 
+### 账号池并发扩展（多账号自动扩容）
+
+网关（workbuddy2api / trae2api）背后可以挂多个账号，账号调度由网关池自己完成；
+bridge 侧的并发闸门会按网关 `/status` 回报的可用账号数自动扩容：
+**实际上限 = `MIMO_BRIDGE_MAX_CONCURRENT`（默认 8）× 可用账号数**——2 个账号即
+16，3 个即 24。账号进入冷却/禁用时上限自动收缩，恢复后自动扩回；全部账号不可用
+时保底按单账号额度放行，由网关裁决。
+
+- 每 30 秒轮询一次网关 `/status`（`MIMO_BRIDGE_POOL_REFRESH_MS` 可调）；网关暂不可
+  达时保留上次结果，不收缩上限。
+- `MIMO_BRIDGE_ACCOUNTS=3` 可手动钉死账号数（不依赖网关探测，任意上游类型可用）。
+- `MIMO_BRIDGE_ACCOUNT_SCALE=off` 关闭扩展，恢复固定单账号上限。
+- 触发上限时的 429 报错会带上算式，例如
+  `bridge concurrency limit reached (16 = 8 × 2 accounts)`；`/status` 的
+  `limits.account_pool` 可查看当前 healthy/total/multiplier。
+
 ## Trae（SOLO）模型后端（可选）
 
 [trae2api](https://github.com/JeffHu0912/trae2api) 把 **TRAE SOLO 对话通道**反代成
@@ -289,7 +328,7 @@ $env:TW2A_API_KEY = "<key>"; .\trae2api.exe -config config.json
 `all accounts unavailable`。
 
 切换：控制面板点第三张「Trae（SOLO）」卡片，或
-`.\启动模型桥.bat trae` / `.\model-bridge.ps1 setup -Upstream trae -UpstreamUrl http://127.0.0.1:7864`。
+`mimo trae` / `powershell -File .\model-bridge.ps1 setup -Upstream trae -UpstreamUrl http://127.0.0.1:7864`。
 `start-bridge.ps1 -Upstream trae` 会自动拉起网关（读 `TRAE2API_DIR`，默认 `~/.trae2api`，
 key 自动取 `trae-api-key.txt`）。
 
@@ -620,8 +659,11 @@ powershell -File .\model-bridge.ps1 remove-startup
 | `WORKBUDDY_API_KEY_FILE` | 空 | 可选的 workbuddy2api API key 文件 |
 | `MIMO_BRIDGE_SECRET` | 空 | 显式指定 bridge secret，优先于文件 |
 | `MIMO_BRIDGE_UPSTREAM_TIMEOUT_MS` | `600000` | 上游请求总超时 |
-| `MIMO_BRIDGE_MAX_BODY_BYTES` | `20971520` | 请求体上限 |
-| `MIMO_BRIDGE_MAX_CONCURRENT` | `8` | 模型请求最大并发数 |
+| `MIMO_BRIDGE_MAX_BODY_BYTES` | `67108864` | 请求体上限（64MB；浏览器截图类会话会把历史图片一起重发） |
+| `MIMO_BRIDGE_MAX_CONCURRENT` | `8` | 单账号模型请求最大并发数；账号池扩开启时实际上限 = 该值 × 可用账号数 |
+| `MIMO_BRIDGE_ACCOUNT_SCALE` | `auto` | 账号池并发扩展开关：`auto`=轮询网关 `/status` 按可用账号数扩容（workbuddy/trae）；`off`=固定单账号 |
+| `MIMO_BRIDGE_ACCOUNTS` | `0` | 手动钉死账号数（如 `3` 即上限 24），优先于自动探测；任意上游类型可用 |
+| `MIMO_BRIDGE_POOL_REFRESH_MS` | `30000` | 账号池状态轮询间隔 |
 | `MIMO_BRIDGE_BREAKER_FAILURES` | `3` | 触发熔断的连续失败次数 |
 | `MIMO_BRIDGE_BREAKER_COOLDOWN_MS` | `5000` | 熔断冷却时间 |
 | `MIMO_BRIDGE_MODEL_PREFIX` | `mimo-desktop` / `off` | 无 namespace 模型的前缀；WorkBuddy 模式默认关闭 |

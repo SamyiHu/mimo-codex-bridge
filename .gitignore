@@ -34,3 +34,8 @@ quota.json
 panel-history.json
 # 误把 %SystemDrive% 当路径产生的目录
 %SystemDrive%/
+
+panel.pid
+*.log
+bridge.pid
+panel-console*.log

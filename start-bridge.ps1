@@ -6,7 +6,7 @@
 param(
     [int]$Port = 8788,
     [ValidateSet("mimo", "workbuddy", "trae")]
-    [string]$Upstream = "mimo",
+    [string]$Upstream = "workbuddy",
     [string]$UpstreamUrl = "",
     [string]$UpstreamTokenFile = "",
     [ValidateSet("compatible", "raw")]
@@ -17,6 +17,12 @@ param(
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+# 各上游的默认引擎地址（未显式传 -UpstreamUrl 时使用）
+if (-not $UpstreamUrl) {
+    if ($Upstream -eq "workbuddy") { $UpstreamUrl = "http://127.0.0.1:7863" }
+    elseif ($Upstream -eq "trae") { $UpstreamUrl = "http://127.0.0.1:7864" }
+}
+
 $dir = $PSScriptRoot
 $entry = Join-Path $dir "bridge.mjs"
 $pidFile = Join-Path $dir "bridge.pid"
@@ -25,10 +31,11 @@ if (-not (Test-Path -LiteralPath $entry)) {
     throw "找不到 bridge.mjs：$entry"
 }
 
-# 桥侧并发上限对齐上游容量：workbuddy 3 账号 × 单账号 8 并发 = 24。
-# 仅在未显式设置环境变量时生效。
+# 桥侧并发上限 = 单账号额度。账号池扩展开启（MIMO_BRIDGE_ACCOUNT_SCALE=auto，默认）时
+# 实际上限 = 本值 × 网关可用账号数，所以这里必须写单账号口径 8；写死账号总数会重复计算
+# （24 × 4 = 96）。要多给并发就调账号数或关掉扩展后用固定值。
 if (-not $env:MIMO_BRIDGE_MAX_CONCURRENT) {
-    $env:MIMO_BRIDGE_MAX_CONCURRENT = "24"
+    $env:MIMO_BRIDGE_MAX_CONCURRENT = "8"
 }
 
 function Get-ProcessRecord([int]$ProcessId) {

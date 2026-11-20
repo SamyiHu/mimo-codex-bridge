@@ -181,9 +181,11 @@ const UPSTREAM_HEADER_TIMEOUT_MS = intFrom(
   process.env.MIMO_BRIDGE_UPSTREAM_HEADER_TIMEOUT_MS || FIRST_TOKEN_TIMEOUT_MS,
   FIRST_TOKEN_TIMEOUT_MS,
 );
+// 请求体上限（默认 64MB）。浏览器自动化类会话会把历史截图一起重发，
+// 20MB 很容易被 base64 图片顶穿；放宽后这类会话仍可继续（本地回环，传输不是瓶颈）。
 const MAX_BODY_BYTES = intFrom(
-  process.env.MIMO_BRIDGE_MAX_BODY_BYTES || 20 * 1024 * 1024,
-  20 * 1024 * 1024,
+  process.env.MIMO_BRIDGE_MAX_BODY_BYTES || 64 * 1024 * 1024,
+  64 * 1024 * 1024,
 );
 const MAX_CONCURRENT_REQUESTS = intFrom(
   process.env.MIMO_BRIDGE_MAX_CONCURRENT || 8,
@@ -194,6 +196,19 @@ const MAX_CONCURRENT_REQUESTS = intFrom(
 const SLOT_REAP_AFTER_MS = intFrom(
   process.env.MIMO_BRIDGE_SLOT_REAP_MS || 30 * 60 * 1000,
   30 * 60 * 1000,
+);
+// 账号池并发扩展：workbuddy/trae 网关背后可挂多个账号（网关 /status 回报
+// healthy 数）。每个账号单独配 MAX_CONCURRENT_REQUESTS 个额度——2 个账号
+// 即 16，3 个即 24；网关自己按账号池调度请求，bridge 只放宽闸门。
+// auto=轮询网关（默认，仅直通型上游）；off=固定单账号；或用
+// MIMO_BRIDGE_ACCOUNTS=N 手动钉死账号数（不探测，任意上游类型可用）。
+const ACCOUNT_SCALE_MODE = (
+  process.env.MIMO_BRIDGE_ACCOUNT_SCALE || "auto"
+).toLowerCase();
+const MANUAL_ACCOUNTS = intFrom(process.env.MIMO_BRIDGE_ACCOUNTS || 0, 0);
+const ACCOUNT_POOL_REFRESH_MS = intFrom(
+  process.env.MIMO_BRIDGE_POOL_REFRESH_MS || 30000,
+  30000,
 );
 const BREAKER_FAILURES = intFrom(
   process.env.MIMO_BRIDGE_BREAKER_FAILURES || 3,
@@ -434,6 +449,89 @@ setInterval(() => {
     );
   }
 }, 60 * 1000).unref();
+// ---- 账号池并发扩展：上限 = 单账号额度 × 网关可用账号数 ----
+const accountPool = {
+  mode: MANUAL_ACCOUNTS > 0 ? "manual" : ACCOUNT_SCALE_MODE,
+  source: "default", // default(未生效) | manual | gateway
+  healthy: 1,
+  total: 1,
+  multiplier: 1,
+  updatedAt: null,
+};
+
+// 从网关 /status 载荷算可用账号数。workbuddy 直接给 healthy/total 计数；
+// trae 只有 accounts 列表，healthy = enabled && !disabled && !cooling
+// （与网关 pool 的 entry.healthy 判定一致）。
+function countHealthyAccounts(kind, payload) {
+  if (!payload || typeof payload !== "object") return { healthy: 0, total: 0 };
+  const healthyCount = Number.parseInt(payload.healthy, 10);
+  if (Number.isFinite(healthyCount)) {
+    const totalCount = Number.parseInt(payload.total, 10);
+    return {
+      healthy: healthyCount,
+      total: Number.isFinite(totalCount) ? totalCount : healthyCount,
+    };
+  }
+  const list = Array.isArray(payload.accounts) ? payload.accounts : [];
+  let healthy = 0;
+  for (const entry of list) {
+    if (!entry || typeof entry !== "object") continue;
+    const traeHealthy = entry.enabled && !entry.disabled && !entry.cooling;
+    const genericHealthy = !entry.disabled && !entry.cooling;
+    if (kind === "trae" ? traeHealthy : genericHealthy) healthy += 1;
+  }
+  return { healthy, total: list.length };
+}
+
+async function fetchGatewayStatus(base) {
+  try {
+    const response = await fetch(base + "/status", {
+      headers: { Authorization: "Bearer " + TOKEN },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) return null;
+    return await response.json().catch(() => null);
+  } catch {
+    return null;
+  }
+}
+
+function applyAccountPool(next) {
+  // healthy=0（全部冷却/禁用）时保底 1：闸门维持单账号额度，
+  // 请求能否成功由网关自己裁决，bridge 不提前放行为 0。
+  const multiplier = Math.max(1, Math.floor(next.healthy) || 0);
+  accountPool.healthy = next.healthy;
+  accountPool.total = next.total;
+  accountPool.multiplier = multiplier;
+  accountPool.updatedAt = new Date().toISOString();
+  if (metrics.setMaxConcurrent(MAX_CONCURRENT_REQUESTS * multiplier)) {
+    console.log(
+      `[bridge] 账号池并发上限：${MAX_CONCURRENT_REQUESTS} × ${multiplier} = ${metrics.maxConcurrent}（healthy=${next.healthy} total=${next.total}）`,
+    );
+  }
+}
+
+async function refreshAccountPool() {
+  if (MANUAL_ACCOUNTS > 0) {
+    accountPool.source = "manual";
+    applyAccountPool({ healthy: MANUAL_ACCOUNTS, total: MANUAL_ACCOUNTS });
+    return;
+  }
+  if (ACCOUNT_SCALE_MODE === "off" || !PASSTHROUGH_UPSTREAM) return;
+  const base = ENGINE_URL || (await discoverEngine());
+  if (!base) return;
+  const payload = await fetchGatewayStatus(base);
+  if (!payload) return; // 网关暂不可达：保留上次结果，不收缩上限
+  accountPool.source = "gateway";
+  applyAccountPool(countHealthyAccounts(UPSTREAM_KIND, payload));
+}
+
+function concurrencyLimitMessage() {
+  if (accountPool.multiplier > 1) {
+    return `bridge concurrency limit reached (${metrics.maxConcurrent} = ${MAX_CONCURRENT_REQUESTS} × ${accountPool.multiplier} accounts)`;
+  }
+  return `bridge concurrency limit reached (${metrics.maxConcurrent})`;
+}
 
 if (BRIDGE_AUTH_MODE === "legacy_shared_token") {
   console.warn(
@@ -738,8 +836,13 @@ async function readBody(request, maxBytes = MAX_BODY_BYTES) {
   for await (const chunk of request) {
     length += chunk.length;
     if (length > maxBytes) {
-      const error = new Error(`request body exceeds ${maxBytes} bytes`);
+      // 用 OpenAI 语义的错误码，避免顶层兜底把 413 标成 internal_error；
+      // 文案带实际字节数，便于区分本地拦截与上游 413。
+      const error = new Error(
+        `request body exceeds ${maxBytes} bytes (received at least ${length})`,
+      );
       error.statusCode = 413;
+      error.code = "request_too_large";
       throw error;
     }
     chunks.push(chunk);
@@ -2050,7 +2153,16 @@ async function handleApiRequest(req, res, metricState = null) {
           first_token_timeout_ms: FIRST_TOKEN_TIMEOUT_MS,
           stream_idle_timeout_ms: STREAM_IDLE_TIMEOUT_MS,
           max_body_bytes: MAX_BODY_BYTES,
-          max_concurrent_requests: MAX_CONCURRENT_REQUESTS,
+          max_concurrent_requests: metrics.maxConcurrent,
+          account_pool: {
+            mode: accountPool.mode,
+            source: accountPool.source,
+            per_account: MAX_CONCURRENT_REQUESTS,
+            healthy: accountPool.healthy,
+            total: accountPool.total,
+            multiplier: accountPool.multiplier,
+            updated_at: accountPool.updatedAt,
+          },
           response_state_ttl_ms: RESPONSE_STATE_TTL_MS,
           response_state_max: RESPONSE_STATE_MAX,
           response_state_file: responseStore.stateFile,
@@ -2935,7 +3047,7 @@ async function runBackgroundResponse(body, chatBody, requestId) {
       status: "failed",
       error: {
         code: "concurrency_limit",
-        message: `bridge concurrency limit reached (${MAX_CONCURRENT_REQUESTS})`,
+        message: concurrencyLimitMessage(),
       },
     });
     metrics.observeError("background_concurrency_limit");
@@ -3071,7 +3183,7 @@ const server = http.createServer((req, res) => {
       sendError(
         res,
         429,
-        `bridge concurrency limit reached (${MAX_CONCURRENT_REQUESTS})`,
+        concurrencyLimitMessage(),
         undefined,
         "concurrency_limit",
       );
@@ -3154,6 +3266,12 @@ server.listen(LISTEN_PORT, "127.0.0.1", async () => {
         ? `[bridge] warning: ${UPSTREAM_KIND} gateway not found; /health will retry`
         : "[bridge] warning: MiMo engine not found; /health will retry",
   );
+  refreshAccountPool().catch(() => {});
+  if (ACCOUNT_SCALE_MODE !== "off" && PASSTHROUGH_UPSTREAM) {
+    setInterval(() => {
+      refreshAccountPool().catch(() => {});
+    }, ACCOUNT_POOL_REFRESH_MS).unref();
+  }
 });
 
 server.on("error", (error) => {

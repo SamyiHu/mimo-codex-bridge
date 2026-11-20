@@ -121,6 +121,17 @@ export class MetricsRegistry {
     return state;
   }
 
+  /**
+   * 运行期调整并发上限（账号池探测用）。只影响后续 tryBegin；
+   * active 已超过新上限时不强制回退，等在飞请求自然排空。
+   */
+  setMaxConcurrent(value) {
+    const next = Math.max(1, Math.floor(Number(value) || 0));
+    if (next === this.maxConcurrent) return false;
+    this.maxConcurrent = next;
+    return true;
+  }
+
   setModel(state, model) {
     if (!state || !model) return;
     state.model = model;
