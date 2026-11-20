@@ -36,6 +36,37 @@ powershell -File .\scripts\install-startup.ps1 -Remove   # 移除自启
 - 并发口径：`MIMO_BRIDGE_MAX_CONCURRENT` 是**单账号**额度（默认 8），账号池扩展开启时实际上限 = 该值 × 网关可用账号数。
 - 杀软提示（Kaspersky `PDM:Trojan.Win32.Generic` 等）：`mimo.cmd/scripts/mimo.ps1` 是纯启动脚本，本身不含恶意代码；杀软是在拦"拉起子进程 / 写启动目录"这类行为。主入口已去掉 WMI 建进程与启动目录写入，自启改成单独脚本；如仍被拦，把项目目录加入信任即可。
 
+## 稳定化与 Qoder 接入（feat/qoder-hardening）
+
+| 模块 | 作用 | 来源 |
+|---|---|---|
+| `retry-policy.mjs` | 上游错误分类 + 三态重试（同号退避 / 换号 / 直接失败），识别排队业务码 10605 | 移植 TraeWorkAssistant `api_server/retry.rs` |
+| `api-keys.mjs` | `ck_` 子 Key + 日配额 + 模型/上游白名单，替代"全局一个 bridge-secret" | 移植 `api_server/api_keys.rs` |
+| `secret-vault.mjs` | 凭证加密：DPAPI 保护主密钥 + AES-256-GCM 数据，兼容旧明文 `.txt` | 对应 `store/vault.rs` 思路 |
+| `scheduler.mjs` | 进程内定时任务：60s tick、当天补跑、失败 30/60/120 分钟退避 | 移植 `tasks/scheduler.rs` |
+| `qoder-cosy.mjs` | Qoder 推理网关 COSY 自签名（AES-128-CBC + RSA PKCS#1 v1.5 + MD5 + 19 头） | 移植 `tasks/qoder_sign.rs` |
+| `qoder-upstream.mjs` | agent 信封构造 + 双层 SSE 拆解 | 移植 `tasks/qoder_upstream.rs` |
+| `qoder-bridge.mjs` | Qoder 的 OpenAI 兼容边车（默认 :7865），带换号与每日签到 | 新写 |
+
+### 启用 Qoder 上游
+
+```text
+node qoder-bridge.mjs                      # 起边车，:7865
+# 面板「Qoder 账号」→ 登录新账号（设备授权）
+```
+
+要在桥里用 Qoder，复制 `upstreams.example.json` 成 `upstreams.json`，加一条：
+
+```json
+{ "id": "qoder", "kind": "openai", "base": "http://127.0.0.1:7865", "tokenFile": "",
+  "capabilities": { "chatMode": "raw", "modelPassthrough": true } }
+```
+
+### 子 Key
+
+未创建任何 `ck_` Key 时行为不变（仍用 `bridge-secret.txt`）；一旦创建，主密钥继续可用，
+子 Key 各自计日配额。
+
 ## 两套凭据
 
 升级后不再让 Codex 直接持有 MiMo 引擎令牌：

@@ -10,12 +10,15 @@
  */
 import http from "node:http";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import os from "node:os";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { promisify } from "node:util";
+import { planRetry, parseRetryAfter } from "./retry-policy.mjs";
+import { ApiKeyStore } from "./api-keys.mjs";
 import {
   CircuitBreaker,
   MetricsRegistry,
@@ -887,15 +890,32 @@ function secretEquals(candidate, expected) {
   return crypto.timingSafeEqual(left, right);
 }
 
+const DIR = path.dirname(fileURLToPath(import.meta.url));
+const apiKeyStore = new ApiKeyStore(path.join(DIR, "api-keys.json"));
+
 function isBridgeAuthorized(request) {
   const authorization = request.headers.authorization || "";
   const bearer = authorization.startsWith("Bearer ")
     ? authorization.slice(7)
     : "";
-  return (
+  // 主密钥（原有行为，保持不变）
+  if (
     secretEquals(bearer, BRIDGE_SECRET) ||
     secretEquals(request.headers["x-api-key"], BRIDGE_SECRET)
-  );
+  ) {
+    return true;
+  }
+  // ck_ 子 Key：记到请求上，供限额/白名单与记账使用
+  const token = bearer || String(request.headers["x-api-key"] || "");
+  if (!token) return false;
+  const result = apiKeyStore.authenticate(token);
+  if (result.ok && result.key) {
+    request.__bridgeApiKey = result.key;
+    apiKeyStore.record(result.key);
+    return true;
+  }
+  if (result.reason) request.__bridgeAuthError = result.reason;
+  return false;
 }
 
 function normalizeModel(body) {
@@ -1153,13 +1173,33 @@ async function fetchUpstreamWithFailover({ urlFor, init, abortContext, requestId
 
     routing.noteResult(route.upstreamId, { status: response.status });
     if (isRetryableStatus(response.status)) {
-      tried.push(route.upstreamId);
+      // 分级处置：先判"该同号退避还是换号"，别一律换号
+      let bodySnippet = "";
+      try {
+        bodySnippet = await response.clone().text();
+      } catch { /* 忽略 */ }
+      const decision = planRetry({
+        status: response.status,
+        body: bodySnippet.slice(0, 2000),
+        attempt: sameRouteAttempts,
+        maxAttempts: 3,
+        hasAlternative: true,
+        retryAfterMs: parseRetryAfter(response.headers.get("retry-after")),
+      });
       debugLog({
         requestId,
         event: "route_failover",
         from: route.upstreamId,
-        reason: "status " + response.status,
+        reason: "status " + response.status + " → " + decision.kind + "/" + decision.action,
       });
+      if (decision.action === "retry_same") {
+        sameRouteAttempts += 1;
+        response.body?.cancel?.().catch(() => {});
+        if (decision.delayMs > 0) await new Promise((r) => setTimeout(r, decision.delayMs));
+        continue;
+      }
+      tried.push(route.upstreamId);
+      sameRouteAttempts = 1;
       const next = await routing.pick({ model, session, exclude: tried });
       if (next.ok) {
         response.body?.cancel?.().catch(() => {});
