@@ -150,6 +150,18 @@
       "routing": "usage",
       "stays": "off",
       "listed": true
+    },
+    {
+      "id": "ds41glm53",
+      "models": [
+        "wb/cn:deepseek-v4.1-flash",
+        "trae/deepseek-v4.1-flash",
+        "wb/cn:glm-5.3-flash",
+        "trae/glm-5.3-flash"
+      ],
+      "routing": "smart",
+      "stays": "auto",
+      "listed": true
     }
   ]
 }
