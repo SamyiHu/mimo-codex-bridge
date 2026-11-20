@@ -620,6 +620,9 @@ export default {
           </div>
           <div class="pblock pane">
             <div class="pblock-head">模型倍率 <span class="k">点行看参数</span></div>
+            <div class="pblock-head">积分日报 <span class="k">余额 / 已用 / 礼包</span></div>
+            <div class="list-scroll" id="wbc-report-body" hidden><div class="empty">点顶部「刷新积分日报」实查</div></div>
+
             <div class="list-scroll" id="wbc-rates"><div class="empty">模型倍率加载中…</div></div>
           </div>
         </div>
@@ -638,6 +641,10 @@ export default {
         <pre id="wbc-checkin-out"></pre>
         <style>
           #wbc-login-box, #wbc-checkin-out { display: none; }
+        .st { font-size: 12px; }
+        .st.err { color: #b91c1c; }
+        .st.warn { color: #b45309; }
+        #wbc-report-body[hidden] { display: none; }
         #wbc-checkin-out.show { display: block; }
         .ck-sum { display: flex; gap: 14px; align-items: baseline; padding: 4px 2px 10px; font-size: 12.5px; color: var(--muted, #6b7280); }
         .ck-sum .ok { color: #15803d; }
@@ -739,11 +746,11 @@ async function uiPrompt(label, def) {
           html += '<table class="p-table"><thead><tr><th>账号</th><th class="num">积分</th><th class="num">成功</th><th class="num">台账</th><th>状态</th><th></th></tr></thead><tbody>';
           accs.forEach(function (a, i) {
             var flags =
-              (a.cooling ? '<span class="chip warn">冷却</span>' : "") +
-              (a.disabled ? '<span class="chip err">自动禁用</span>' : "") +
-              (a.manual_disabled ? '<span class="chip err">手动停用</span>' : "") +
+              (a.cooling ? '<span class="st warn">冷却中</span>' : "") +
+              (a.disabled ? '<span class="st err" title="网关按失败率自动摘除">自动禁用</span>' : "") +
+              (a.manual_disabled ? '<span class="st err" title="被手动停用">手动停用</span>' : "") +
               ((a.rate_limited_models || []).length
-                ? '<span class="chip warn">限流 ' + esc((a.rate_limited_models || []).map(function (x) { return x.model; }).join(" · ")) + "</span>"
+                ? '<span class="st warn">限流 ' + esc((a.rate_limited_models || []).map(function (x) { return x.model; }).join(" · ")) + "</span>"
                 : "");
             var acts =
               (a.manual_disabled ? act("启用", "enable:" + a.uid) : act("停用", "disable:" + a.uid)) +
@@ -963,15 +970,20 @@ async function uiPrompt(label, def) {
           reportRunning = true;
           var btn = byId("wbc-report");
           var body = byId("wbc-report-body");
+          var setBody = function (html) {
+            if (!body) return;
+            body.hidden = false;
+            body.innerHTML = html;
+          };
           if (!silent) {
             busy(btn, true, "刷新积分日报");
-            body.innerHTML = '<div class="empty">正在实查上游余额，多账号时可能要等一会…</div>';
+            setBody('<div class="empty">正在实查上游余额，多账号时可能要等一会…</div>');
           }
           try {
             var r = await fetch(BASE + "/report", { method: "POST" });
             var d = await r.json();
             if (!d.ok) {
-              if (!silent) body.innerHTML = '<div class="empty"><span class="dot err"></span>' + esc(d.error) + "</div>";
+              if (!silent) setBody('<div class="empty"><span class="dot err"></span>' + esc(d.error) + "</div>");
               return;
             }
             var rep = d.report || {};
@@ -997,7 +1009,7 @@ async function uiPrompt(label, def) {
             });
             body.innerHTML = html;
           } catch (e) {
-            if (!silent) body.innerHTML = '<div class="empty"><span class="dot err"></span>' + esc(String(e)) + "</div>";
+            if (!silent) setBody('<div class="empty"><span class="dot err"></span>' + esc(String(e)) + "</div>");
           } finally {
             reportRunning = false;
             if (!silent) busy(btn, false, "刷新积分日报");
