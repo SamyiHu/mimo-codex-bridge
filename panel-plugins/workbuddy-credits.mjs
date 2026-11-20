@@ -615,14 +615,11 @@ export default {
           <div class="pblock pane">
             <div class="pblock-head">账号 <span class="k">点行看台账</span></div>
             <div class="list-scroll" id="wbc-pool"><div class="empty">加载中…</div></div>
-            <div class="pblock-head">用量</div>
+            <div class="pblock-head">用量 <span class="grow"></span><span class="k" id="wbc-report-sum"></span></div>
             <div class="rows" id="wbc-stats"><div class="empty">统计加载中…</div></div>
           </div>
           <div class="pblock pane">
             <div class="pblock-head">模型倍率 <span class="k">点行看参数</span></div>
-            <div class="pblock-head">积分日报 <span class="k">余额 / 已用 / 礼包</span></div>
-            <div class="list-scroll" id="wbc-report-body" hidden><div class="empty">点顶部「刷新积分日报」实查</div></div>
-
             <div class="list-scroll" id="wbc-rates"><div class="empty">模型倍率加载中…</div></div>
           </div>
         </div>
@@ -721,6 +718,13 @@ async function uiPrompt(label, def) {
         // 白天领的礼包/任务积分不回写，直接显示会与实时值差一大截
         var creditsCache = {};
 
+        function creditTip(a) {
+          var c = creditsCache[a.uid];
+          if (!c) return "未实查";
+          return "已用 " + (c.used != null ? c.used : "—") + " / 总量 " + (c.size != null ? c.size : "—") +
+            " / 礼包 " + (c.packages != null ? c.packages : "—") + " · " + c.time + " 实查";
+        }
+
         function fmtBalance(a) {
           var c = creditsCache[a.uid];
           if (c) return "积分 " + c.remain + "（" + c.time + " 实查）";
@@ -778,7 +782,7 @@ async function uiPrompt(label, def) {
             html +=
               '<tr class="acc-row" data-i="' + i + '"><td>' + esc(a.nickname || String(a.uid || "").slice(0, 8)) +
               (a.realm ? ' <span class="k">' + esc(a.realm) + "</span>" : "") + "</td>" +
-              '<td class="num">' + esc(balance) + "</td>" +
+              '<td class="num" title="' + esc(creditTip(a)) + '">' + esc(balance) + "</td>" +
               '<td class="num">' + (a.success_count || 0) + "</td>" +
               '<td class="num">' + ((a.model_costs || []).length ? (a.model_costs || []).length + " 模型" : "—") + "</td>" +
               "<td>" + (flags || '<span class="st-pill ok">正常</span>') + "</td>" +
@@ -988,21 +992,13 @@ async function uiPrompt(label, def) {
           if (reportRunning) return;
           reportRunning = true;
           var btn = byId("wbc-report");
-          var body = byId("wbc-report-body");
-          var setBody = function (html) {
-            if (!body) return;
-            body.hidden = false;
-            body.innerHTML = html;
-          };
-          if (!silent) {
-            busy(btn, true, "刷新积分日报");
-            setBody('<div class="empty">正在实查上游余额，多账号时可能要等一会…</div>');
-          }
+          var sumEl = byId("wbc-report-sum");
+          if (!silent) busy(btn, true, "刷新积分日报");
           try {
             var r = await fetch(BASE + "/report", { method: "POST" });
             var d = await r.json();
             if (!d.ok) {
-              if (!silent) setBody('<div class="empty"><span class="dot err"></span>' + esc(d.error) + "</div>");
+              if (!silent && sumEl) sumEl.textContent = "积分实查失败：" + (d.error || "");
               return;
             }
             var rep = d.report || {};
@@ -1010,30 +1006,18 @@ async function uiPrompt(label, def) {
             var accs = Array.isArray(rep.accounts) ? rep.accounts : [];
             var fetchedAt = new Date(d.at).toLocaleTimeString("zh-CN", { hour12: false });
             accs.forEach(function (a) {
-              if (a.uid) creditsCache[a.uid] = { remain: a.remain, time: fetchedAt };
+              if (!a.uid) return;
+              creditsCache[a.uid] = { remain: a.remain, time: fetchedAt, used: a.used, size: a.size, packages: a.packages, ok: a.ok };
             });
+            if (sumEl) {
+              sumEl.textContent = "剩余 " + (total.remain != null ? total.remain : "—") +
+                " · 已用 " + (total.used != null ? total.used : "—") +
+                " · 总量 " + (total.size != null ? total.size : "—") +
+                " · " + fetchedAt + " 实查";
+            }
             loadAll();
-            if (silent) return;
-            var html = '<div class="rp-sum">' +
-              '<span class="rp-k">剩余</span><b>' + (total.remain != null ? total.remain : "—") + "</b>" +
-              '<span class="rp-k">已用</span><b>' + (total.used != null ? total.used : "—") + "</b>" +
-              '<span class="rp-k">总量</span><b>' + (total.size != null ? total.size : "—") + "</b>" +
-              '<span class="rp-time">' + fetchedAt + "</span></div>";
-            html += '<table class="rp-table"><thead><tr><th>账号</th><th class="num">剩余</th><th class="num">已用</th><th class="num">总量</th><th class="num">礼包</th></tr></thead><tbody>';
-            accs.forEach(function (a) {
-              var name = (a.nickname || String(a.uid || "").slice(0, 8));
-              html += "<tr>" +
-                "<td>" + esc(name) + (a.ok ? "" : ' <span class="rp-fail">失败</span>') + "</td>" +
-                '<td class="num">' + (a.remain != null ? a.remain : "—") + "</td>" +
-                '<td class="num">' + (a.used != null ? a.used : "—") + "</td>" +
-                '<td class="num">' + (a.size != null ? a.size : "—") + "</td>" +
-                '<td class="num">' + (a.packages != null ? a.packages : "—") + "</td>" +
-                "</tr>";
-            });
-            html += "</tbody></table>";
-            setBody(html);
           } catch (e) {
-            if (!silent) setBody('<div class="empty"><span class="dot err"></span>' + esc(String(e)) + "</div>");
+            if (!silent && sumEl) sumEl.textContent = "积分实查失败：" + String(e);
           } finally {
             reportRunning = false;
             if (!silent) busy(btn, false, "刷新积分日报");
@@ -1041,7 +1025,7 @@ async function uiPrompt(label, def) {
           }
         }
 
-        async function doCheckin() {
+                async function doCheckin() {
           var btn = byId("wbc-checkin");
           var out = byId("wbc-checkin-out");
           busy(btn, true, "立即签到");
