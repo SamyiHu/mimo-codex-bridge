@@ -544,6 +544,34 @@ export default {
       return json(res, 200, { ok: true, report: payload, at: new Date().toISOString() });
     });
 
+    // signin_bin 输出是「uid | nick | status | remain | detail」表格；这里解析成结构化结果，
+    // 并把"必须重新登录"的账号单独拎出来（AUTH_INVALID / session_dead / 12153）。
+    function parseSigninReport(text) {
+      const lines = String(text || "").split(/\r?\n/);
+      const accounts = [];
+      let summary = null;
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (/^total=\d+/.test(line)) {
+          const m = line.match(/total=(\d+)\s+ok=(\d+)\s+already=(\d+)\s+fail=(\d+)/);
+          if (m) summary = { total: +m[1], ok: +m[2], already: +m[3], fail: +m[4] };
+          continue;
+        }
+        const parts = line.split("|").map((x) => x.trim());
+        if (parts.length < 4) continue;
+        const uid = parts[0];
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(uid)) continue;
+        const rawDetail = parts.slice(4).join("|").trim();
+        let detail = rawDetail;
+        if (/\b10001\b/.test(rawDetail) || rawDetail.includes("今天已")) detail = "今天已签到";
+        else if (/12153|session_dead|AUTH_INVALID/i.test(rawDetail)) detail = "凭证已失效（12153 session_dead），需要重新登录";
+        else if (!rawDetail) detail = "";
+        accounts.push({ uid, nick: parts[1] || "", status: parts[2] || "", remain: parts[3] || "", detail: detail.slice(0, 120) });
+      }
+      const needRelogin = accounts.filter((a) => /AUTH_INVALID|session_dead|12153/i.test(a.status + " " + a.detail));
+      return { accounts, summary, needRelogin };
+    }
+
     registerRoute("POST", "/checkin", async (req, res, { json }) => {
       const s = settings();
       const exe = path.join(s.gatewayDir, "signin_bin.exe");
@@ -557,7 +585,15 @@ export default {
       if (!r.ok) {
         return json(res, 200, { ok: false, error: (r.stderr || r.stdout || "signin_bin 失败").slice(-400) });
       }
-      return json(res, 200, { ok: true, output: r.stdout.trim(), at: new Date().toISOString() });
+      const parsed = parseSigninReport(r.stdout);
+      return json(res, 200, {
+        ok: true,
+        output: r.stdout.trim(),
+        accounts: parsed.accounts,
+        summary: parsed.summary,
+        needRelogin: parsed.needRelogin,
+        at: new Date().toISOString(),
+      });
     });
 
     registerCard(`
@@ -602,6 +638,25 @@ export default {
         <pre id="wbc-checkin-out"></pre>
         <style>
           #wbc-login-box, #wbc-checkin-out { display: none; }
+        #wbc-checkin-out.show { display: block; }
+        .ck-sum { display: flex; gap: 14px; align-items: baseline; padding: 4px 2px 10px; font-size: 12.5px; color: var(--muted, #6b7280); }
+        .ck-sum .ok { color: #15803d; }
+        .ck-sum .bad { color: #b91c1c; }
+        .ck-list { display: flex; flex-direction: column; gap: 4px; }
+        .ck-row { display: grid; grid-template-columns: 10px 96px 68px 84px 1fr; align-items: center; gap: 10px;
+                  padding: 8px 10px; border-radius: 8px; background: rgba(127,127,127,.05); font-size: 12.5px; }
+        .ck-dot { width: 8px; height: 8px; border-radius: 50%; background: #9ca3af; }
+        .ck-dot.ok, .ck-dot.today { background: #16a34a; }
+        .ck-dot.bad { background: #dc2626; }
+        .ck-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .ck-uid { font-family: ui-monospace, Consolas, monospace; opacity: .55; }
+        .ck-state { font-size: 12px; }
+        .ck-state.ok, .ck-state.today { color: #15803d; }
+        .ck-state.bad { color: #b91c1c; }
+        .ck-credit { font-variant-numeric: tabular-nums; }
+        .ck-detail { color: var(--muted, #6b7280); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .ck-warn { margin-top: 10px; padding: 9px 12px; border-radius: 8px; background: rgba(220,38,38,.08); color: #b91c1c; font-size: 12.5px; }
+        .ck-actions { margin-top: 8px; }
           #wbc-login-box.show, #wbc-checkin-out.show { display: block; }
         </style>
       </section>
@@ -963,7 +1018,55 @@ async function uiPrompt(label, def) {
               out.textContent = "签到失败：" + (d.error || "");
               return;
             }
-            out.textContent = "[" + new Date(d.at).toLocaleTimeString("zh-CN", { hour12: false }) + "]\\n" + d.output;
+            var need = d.needRelogin || [];
+            var sum = d.summary || { total: (d.accounts || []).length, ok: 0, already: 0, fail: 0 };
+            var when = new Date(d.at).toLocaleTimeString("zh-CN", { hour12: false });
+            var STATUS = { ALREADY: "today", OK: "ok", AUTH_INVALID: "bad" };
+            var TEXT = { ALREADY: "今天已签", OK: "签到成功", AUTH_INVALID: "凭证失效" };
+            var html = ['<div class="ck-sum"><b>' + esc(when) + '</b>',
+              '<span>共 ' + sum.total + ' 个</span>',
+              '<span class="ok">成功 ' + sum.ok + '</span>',
+              '<span>今天已签 ' + sum.already + '</span>',
+              (sum.fail ? '<span class="bad">失败 ' + sum.fail + '</span>' : ''),
+              '</div><div class="ck-list">'];
+            (d.accounts || []).forEach(function (a) {
+              var cls = STATUS[a.status] || "unknown";
+              html.push('<div class="ck-row">' +
+                '<span class="ck-dot ' + cls + '"></span>' +
+                '<span class="ck-name">' + esc(a.nick || a.uid.slice(0, 8)) + '</span>' +
+                '<span class="ck-uid">' + esc(a.uid.slice(0, 8)) + '</span>' +
+                '<span class="ck-state ' + cls + '">' + esc(TEXT[a.status] || a.status || "未知") + '</span>' +
+                (a.remain && a.remain !== "-" ? '<span class="ck-credit">' + esc(a.remain) + ' 积分</span>' : '') +
+                (a.detail ? '<span class="ck-detail">' + esc(a.detail) + '</span>' : '') +
+                '</div>');
+            });
+            html.push('</div>');
+            if (need.length) {
+              html.push('<div class="ck-warn">⚠ ' + need.length + ' 个账号的 refresh_token 已失效，需要重新扫码登录；停用后不再参与选号</div>');
+            }
+            out.innerHTML = html.join("");
+            if (need.length) {
+              var bar = document.createElement("div");
+              bar.className = "ck-actions";
+              var relinkBtn = document.createElement("button");
+              relinkBtn.type = "button";
+              relinkBtn.className = "btn sm";
+              relinkBtn.textContent = "停用这 " + need.length + " 个失效账号";
+              relinkBtn.onclick = async function () {
+                relinkBtn.disabled = true;
+                relinkBtn.textContent = "处理中…";
+                for (var k = 0; k < need.length; k++) {
+                  await fetch(BASE + "/admin/account", {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ uid: need[k].uid, action: "disable" }),
+                  }).catch(function () {});
+                }
+                relinkBtn.textContent = "已停用";
+                loadAll();
+              };
+              bar.appendChild(relinkBtn);
+              out.appendChild(bar);
+            }
           } catch (e) {
             out.textContent = "签到失败：" + String(e);
           } finally {

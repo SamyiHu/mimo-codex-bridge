@@ -314,9 +314,15 @@ function runPowerShell(script, args = [], timeoutMs = 30000) {
       ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, ...args],
       { cwd: DIR, windowsHide: true },
     );
+    const outChunks = [];
+    const errChunks = [];
     let stdout = "";
     let stderr = "";
     let settled = false;
+    const flush = () => {
+      stdout = decodeConsole(Buffer.concat(outChunks));
+      stderr = decodeConsole(Buffer.concat(errChunks));
+    };
     const done = (result) => {
       if (settled) return;
       settled = true;
@@ -336,21 +342,33 @@ function runPowerShell(script, args = [], timeoutMs = 30000) {
         stderr: stderr + "\n[panel] PowerShell 超时被中止",
       });
     }, timeoutMs);
-    child.stdout.on("data", (d) => {
-      stdout += d.toString();
-    });
-    child.stderr.on("data", (d) => {
-      stderr += d.toString();
-    });
+    child.stdout.on("data", (d) => outChunks.push(Buffer.from(d)));
+    child.stderr.on("data", (d) => errChunks.push(Buffer.from(d)));
     child.on("error", (error) => {
+      flush();
       done({ ok: false, code: -1, stdout, stderr: String(error) });
     });
     // 用 exit 而不是 close：start-bridge 的 Start-Process 孙进程会占住 stdio，
     // close 会永远等不到 EOF，动作就吊死在“正在启动”。
     child.on("exit", (code) => {
+      flush();
       done({ ok: code === 0, code, stdout, stderr });
     });
   });
+}
+
+/**
+ * decodeConsole — 控制台程序输出编码不定（GBK/UTF-8 都有），且可能被按字节截断
+ * （截断在汉字中间 → 整段严格解码失败）。做法：两种编码都试，选"替换字符更少"的那个；
+ * 这样 GBK 程序不变乱码，UTF-8 程序也不会因为一个截断字整段报废。
+ */
+function decodeConsole(buffer) {
+  if (!buffer || !buffer.length) return "";
+  const bad = (text) => (text.match(/\uFFFD/g) || []).length;
+  const utf8 = buffer.toString("utf8");
+  let gbk = utf8;
+  try { gbk = new TextDecoder("gbk").decode(buffer); } catch { /* 没 ICU 就只用 utf8 */ }
+  return bad(gbk) < bad(utf8) ? gbk : utf8;
 }
 
 function runCommand(exe, args, opts = {}) {
@@ -360,9 +378,15 @@ function runCommand(exe, args, opts = {}) {
       windowsHide: true,
       ...opts.spawnOpts,
     });
+    const outChunks = [];
+    const errChunks = [];
     let stdout = "";
     let stderr = "";
     let settled = false;
+    const flush = () => {
+      stdout = decodeConsole(Buffer.concat(outChunks));
+      stderr = decodeConsole(Buffer.concat(errChunks));
+    };
     const done = (result) => {
       if (settled) return;
       settled = true;
@@ -375,16 +399,19 @@ function runCommand(exe, args, opts = {}) {
       } catch {
         /* ignore */
       }
+      flush();
       done({ ok: false, code: -2, stdout, stderr: stderr + "\n[panel] 命令超时" });
     }, opts.timeoutMs || 15000);
-    child.stdout?.on("data", (d) => {
-      stdout += d.toString();
+    child.stdout?.on("data", (d) => outChunks.push(Buffer.from(d)));
+    child.stderr?.on("data", (d) => errChunks.push(Buffer.from(d)));
+    child.on("error", (error) => {
+      flush();
+      done({ ok: false, code: -1, stdout, stderr: String(error) });
     });
-    child.stderr?.on("data", (d) => {
-      stderr += d.toString();
+    child.on("exit", (code) => {
+      flush();
+      done({ ok: code === 0, code, stdout, stderr });
     });
-    child.on("error", (error) => done({ ok: false, code: -1, stdout, stderr: String(error) }));
-    child.on("exit", (code) => done({ ok: code === 0, code, stdout, stderr }));
   });
 }
 
