@@ -432,7 +432,13 @@ export default {
           #wtr-login-box, #wtr-import-area, #wtr-out { display: none; }
           #wtr-login-box.show, #wtr-import-area.show, #wtr-out.show { display: block; }
           /* 账号表有 6 个操作胶囊，窄栏里会溢出被裁掉：允许换行、别再压成 1% 宽 */
-          #wtr-accounts table.p-table td.acts { width: auto; white-space: normal; }
+          #wtr-accounts table.p-table td.acts { width: auto; white-space: nowrap; }
+          .wtr-menu {
+            position: fixed; z-index: 80; display: flex; flex-direction: column; gap: 4px;
+            padding: 6px; background: var(--card, #fff); border: 1px solid var(--line, #e6e6ea);
+            border-radius: 10px; box-shadow: 0 10px 24px rgba(0,0,0,.14);
+          }
+          .wtr-menu .wtr-act { margin: 0; }
           #wtr-accounts table.p-table td.acts .wtr-act { margin: 3px 5px 3px 0; }
           #wtr-accounts table.p-table td { vertical-align: top; padding-top: 8px; padding-bottom: 8px; }
           #wtr-accounts table.p-table td:first-child { min-width: 130px; }
@@ -513,8 +519,7 @@ async function uiPrompt(label, def) {
               act("改名", "rename:" + a.uid) +
               act("签到", "checkin:" + a.uid) +
               act("刷新", "refresh:" + a.uid) +
-              act("凭证", "cred:" + a.uid) +
-              act("删除", "delete:" + a.uid);
+              '<button type="button" class="wtr-act wtr-more" data-more="' + esc(a.uid) + '" title="更多操作">⋯</button>';
             html +=
               '<tr class="acc-row" data-i="' + i + '"><td>' + esc(a.nickname || String(a.uid).slice(0, 8)) +
               ' <span class="k">' + esc(String(a.uid).slice(0, 8)) + "</span></td>" +
@@ -540,7 +545,10 @@ async function uiPrompt(label, def) {
               tr.classList.toggle("open");
             });
           });
-          Array.prototype.forEach.call(el.querySelectorAll(".wtr-act"), function (n) { n.addEventListener("click", onAct); });
+          Array.prototype.forEach.call(el.querySelectorAll(".wtr-act[data-act]"), function (n) { n.addEventListener("click", onAct); });
+          Array.prototype.forEach.call(el.querySelectorAll(".wtr-more"), function (n) {
+            n.addEventListener("click", function (ev) { ev.stopPropagation(); openActMenu(n, n.getAttribute("data-more")); });
+          });
         }
 
         async function load() {
@@ -551,6 +559,38 @@ async function uiPrompt(label, def) {
             byId("wtr-accounts").innerHTML = row("账号池", '<span class="dot err"></span>' + esc(String(e)));
           }
         }
+
+        var actMenu = null;
+        function closeActMenu() {
+          if (actMenu && actMenu.parentNode) actMenu.parentNode.removeChild(actMenu);
+          actMenu = null;
+        }
+        function openActMenu(btn, uid) {
+          var same = actMenu && actMenu.getAttribute("data-uid") === uid;
+          closeActMenu();
+          if (same) return;
+          var m = document.createElement("div");
+          m.className = "wtr-menu";
+          m.setAttribute("data-uid", uid);
+          m.innerHTML =
+            '<button type="button" class="wtr-act" data-act="cred:' + uid + '">凭证</button>' +
+            '<button type="button" class="wtr-act" data-act="delete:' + uid + '">删除</button>';
+          document.body.appendChild(m);
+          var r = btn.getBoundingClientRect();
+          m.style.left = Math.max(8, Math.min(window.innerWidth - m.offsetWidth - 8, r.right - m.offsetWidth)) + "px";
+          m.style.top = Math.min(window.innerHeight - m.offsetHeight - 8, r.bottom + 6) + "px";
+          Array.prototype.forEach.call(m.querySelectorAll(".wtr-act"), function (b) {
+            b.addEventListener("click", function (ev) { ev.stopPropagation(); closeActMenu(); onAct(ev); });
+          });
+          actMenu = m;
+        }
+        document.addEventListener("click", function (ev) {
+          if (!actMenu) return;
+          if (actMenu.contains(ev.target)) return;
+          if (ev.target.closest && ev.target.closest(".wtr-more")) return;
+          closeActMenu();
+        });
+        window.addEventListener("resize", closeActMenu);
 
         async function onAct(ev) {
           var spec = ev.target.getAttribute("data-act") || "";
