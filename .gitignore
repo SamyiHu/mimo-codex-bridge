@@ -27,7 +27,7 @@ probe2.cjs
 .patchverify/
 .tmp-*
 # 多上游运行态：本机配置，不入库（默认保持单上游）
-upstreams.json
+# upstreams.json 现在作为默认路由配置入库（不含密钥，只引用 tokenFile）
 upstreams.disabled.json
 upstreams.local.json
 quota.json
