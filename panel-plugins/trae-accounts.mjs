@@ -755,6 +755,60 @@ async function uiPrompt(label, def) {
           }
         }
 
+        // ── 模型详情：与 WorkBuddy 卡一致的「点行展开」，不再弹原始 JSON ──
+        var modelInfoCache = null;
+        async function loadModelInfo() {
+          if (modelInfoCache) return modelInfoCache;
+          try {
+            var r = await fetch("/api/status");
+            var st = await r.json();
+            modelInfoCache = Array.isArray(st.modelDetails) ? st.modelDetails : [];
+          } catch (e) {
+            modelInfoCache = [];
+          }
+          return modelInfoCache;
+        }
+        function miParam(k, v) {
+          if (v == null || v === "" || v === 0) return "";
+          return '<div class="param"><span class="pk">' + esc(k) + '</span><span class="pv">' + esc(String(v)) + "</span></div>";
+        }
+        function miCtx(v) {
+          var n = Number(v) || 0;
+          if (!n) return "";
+          return n >= 1000 ? Math.round(n / 1000) + "K" : String(n);
+        }
+        async function toggleModelDetail(tr, model) {
+          var next = tr.nextElementSibling;
+          if (next && next.className.indexOf("model-detail") >= 0) {
+            next.hidden = !next.hidden;
+            return;
+          }
+          var details = await loadModelInfo();
+          var raw = null;
+          for (var i = 0; i < details.length; i++) {
+            var id = String((details[i] || {}).id || "");
+            if (id === model || id === "trae/" + model || id.endsWith("/" + model)) { raw = details[i]; break; }
+          }
+          var m = raw || {};
+          var rate = tr.getAttribute("data-rate");
+          var body = '<div class="param-grid">' +
+            miParam("显示名", tr.getAttribute("data-name")) +
+            miParam("倍率", rate ? Number(rate).toFixed(2) + "x / credit" : "") +
+            miParam("会员倍率", tr.getAttribute("data-member")) +
+            miParam("上下文", miCtx(m.context_length || m.max_allowed_size)) +
+            miParam("最大输出", m.max_output_tokens) +
+            miParam("图片", m.supports_images ? "支持" : "") +
+            miParam("工具调用", m.supports_tool_call ? "支持" : "") +
+            miParam("vendor", m.vendor || m.owned_by) +
+            '<div class="param wide"><span class="pv" style="opacity:.65">TRAE 网关只回模型 ID / 倍率 / 归属，上下文与最大输出它不提供</span></div>' +
+            (m.description ? '<div class="param wide"><span class="pv">' + esc(m.description) + "</span></div>" : "") +
+            "</div>";
+          var detailTr = document.createElement("tr");
+          detailTr.className = "model-detail";
+          detailTr.innerHTML = '<td colspan="4">' + body + "</td>";
+          tr.parentNode.insertBefore(detailTr, tr.nextSibling);
+        }
+
         // 模型倍率：直连上游解析的 consumption_rate，按倍率降序（贵的在上）
         async function loadRates() {
           var el = byId("wtr-rates");
@@ -772,7 +826,7 @@ async function uiPrompt(label, def) {
               var member = m.memberRate != null
                 ? Number(m.memberRate).toFixed(2) + "x" + (m.matched ? " ✓" : "")
                 : "—";
-              html += '<tr class="rate-row" data-model="trae/' + esc(m.id) + '" title="点击看这个模型的上游参数"><td>' + esc(m.id) + "</td><td>" + esc(m.name || "—") +
+              html += '<tr class="rate-row" data-model="trae/' + esc(m.id) + '" data-name="' + esc(m.name || "") + '" data-rate="' + esc(m.rate) + '" data-member="' + esc(member === "—" ? "" : member) + '" title="点击看这个模型的上游参数"><td>' + esc(m.id) + "</td><td>" + esc(m.name || "—") +
                 '</td><td class="num">' + Number(m.rate).toFixed(2) + "x</td>" +
                 '<td class="num">' + member + "</td></tr>";
             });
@@ -781,7 +835,7 @@ async function uiPrompt(label, def) {
             Array.prototype.forEach.call(el.querySelectorAll(".rate-row"), function (node) {
               node.style.cursor = "pointer";
               node.addEventListener("click", function () {
-                if (window.__uiModelInfo) window.__uiModelInfo(node.getAttribute("data-model"));
+                toggleModelDetail(node, node.getAttribute("data-model"));
               });
             });
           } catch (e) {

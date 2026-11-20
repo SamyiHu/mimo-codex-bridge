@@ -1867,7 +1867,28 @@
       null;
     const modelId = raw ? raw.id : target;
     const kv = (k, v) => '<div class="kv"><div class="k2">' + k + '</div><div class="v2">' + esc(v == null ? "—" : String(v)) + "</div></div>";
-    let body = '<div class="detail">' + kv("模型 ID", modelId) + (raw ? Object.entries(raw).filter(([k]) => k !== "id").map(([k, v]) => kv(k, typeof v === "object" ? JSON.stringify(v) : v)).join("") : '<div class="k">上游没回这个模型的字段</div>') + "</div>";
+    const SKIP = new Set(["id", "object", "created", "created_at", "owned_by", "ownedBy"]);
+    const HUMAN = [
+      ["上下文", (m) => { const n = Number(m.context_length || m.max_allowed_size || 0); return n > 0 ? (n >= 1000 ? Math.round(n / 1000) + "K" : String(n)) : ""; }],
+      ["最大输出", (m) => (Number(m.max_output_tokens || 0) > 0 ? String(m.max_output_tokens) : "")],
+      ["推理强度", (m) => m.reasoning_effort || ""],
+      ["图片", (m) => (m.supports_images ? "支持" : "")],
+      ["工具调用", (m) => (m.supports_tool_call ? "支持" : "")],
+      ["vendor", (m) => m.vendor || m.owned_by || ""],
+    ];
+    let body = '<div class="detail">' + kv("模型 ID", modelId);
+    if (raw) {
+      body += HUMAN.map(([label, pick]) => { const v = pick(raw); return v ? kv(label, v) : ""; }).join("");
+      body += Object.entries(raw)
+        .filter(([k, v]) => !SKIP.has(k) && HUMAN.every(([label]) => label !== k) && v != null && v !== "" && v !== 0)
+        .filter(([k]) => !["context_length", "max_allowed_size", "max_output_tokens", "reasoning_effort", "supports_images", "supports_tool_call", "vendor", "description"].includes(k))
+        .map(([k, v]) => kv(k, typeof v === "object" ? JSON.stringify(v) : v))
+        .join("");
+      if (raw.description) body += '<div class="kv"><div class="k2">说明</div><div class="v2">' + esc(raw.description) + "</div></div>";
+    } else {
+      body += '<div class="k">上游没回这个模型的字段</div>';
+    }
+    body += "</div>";
     void sheet("模型参数", body, [{ label: "关闭", kind: "primary", value: true }]);
   };
 
