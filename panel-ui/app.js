@@ -800,7 +800,14 @@
     return state.routing;
   }
 
-  const draft = () => state.routingDraft || (state.routingDraft = defaultDraft());
+  // 草稿优先用已经读到的磁盘配置：从「路由组」页直接进来时 state.routing 是有的，
+  // 但之前没人调 loadRouting，草稿会退回 defaultDraft()（假数据），一保存就把真配置盖掉。
+  const draft = () => {
+    if (state.routingDraft) return state.routingDraft;
+    const fromDisk = state.routing && state.routing.registry;
+    state.routingDraft = fromDisk ? JSON.parse(JSON.stringify(fromDisk)) : defaultDraft();
+    return state.routingDraft;
+  };
 
   /* ── 编辑器：上游 / 路由组 分开放，各自一页 ─────────────────── */
   function enabledHead(r) {
@@ -959,8 +966,15 @@
   }
 
   async function collectAndSaveRouting() {
+    // 草稿没读进来就保存 = 拿 defaultDraft() 覆盖 upstreams.json，先补一次读盘
+    if (!state.routing) await loadRouting(true);
+    if (!state.routing) {
+      toast("路由配置还没读进来，先点「从磁盘重读」", "err");
+      return { ok: false, error: "routing not loaded" };
+    }
     const d = draft();
-    for (const u of d.upstreams) delete u.__newMember;
+    for (const u of d.upstreams || []) delete u.__newMember;
+    for (const g of d.groups || []) delete g.__newMember;
     const result = await post("/api/routing", d);
     if (result.ok) {
       state.routingDraftDirty = false;
@@ -973,17 +987,28 @@
   }
 
   async function saveQuotaFromEditor() {
+    // 只有「上游」页才有额度输入。没有就别 POST {}（会把 quota.json 清空），也别在
+    // 这里抛异常——以前 $() 返回单个元素/null，.forEach 直接把整个保存流程打断。
+    const shares = $$("[data-role='quota-share']");
+    if (!shares.length) return { ok: true, skipped: true };
+    const hours = $$("[data-role='quota-hours']");
     const quota = {};
-    $("[data-role='quota-share']").forEach((input) => {
+    shares.forEach((input) => {
       const id = input.getAttribute("data-id");
       const share = Number(input.value);
-      const hours = Number($($("[data-role='quota-hours']").find((el) => el.getAttribute("data-id") === id))?.value);
-      if (!input.value && !hours) return;
-      quota[id] = { share: Number.isFinite(share) ? Math.min(1, Math.max(0, share / 100)) : null, resetsAt: Number.isFinite(hours) && hours > 0 ? Date.now() + hours * 3600000 : null };
+      const hEl = hours.find((el) => el.getAttribute("data-id") === id);
+      const h = Number(hEl ? hEl.value : NaN);
+      const hasHours = Number.isFinite(h) && h > 0;
+      if (!input.value && !hasHours) return;
+      quota[id] = {
+        share: Number.isFinite(share) ? Math.min(1, Math.max(0, share / 100)) : null,
+        resetsAt: hasHours ? Date.now() + h * 3600000 : null,
+      };
     });
     const result = await post("/api/quota", quota);
     if (result.ok) toast("quota.json 已写入", "ok");
     else toast("quota 写入失败：" + (result.error || ""), "err");
+    return result;
   }
 
   /* ── 路由 ───────────────────────────────────────────────── */
@@ -1520,7 +1545,7 @@
     state.renderKey = key;
 
     body.innerHTML = page.render();
-    if (state.page === "upstreams" || state.page === "models") {
+    if (state.page === "upstreams" || state.page === "models" || state.page === "groups") {
       if (!state.routing) void loadRouting().then(() => render(true));
     }
     if (state.page === "upstreams") mountCharts();
@@ -1703,14 +1728,20 @@
   }
 
   document.addEventListener("input", (event) => {
-    if (event.target.closest && event.target.closest("#routingEditor")) draftUpdate(event);
+    // 「路由组」页的编辑器 id 是 #groupEditor，之前只认 #routingEditor，改组 id 改了也不进草稿
+    if (event.target.closest && event.target.closest("#routingEditor, #groupEditor")) draftUpdate(event);
   });
 
   document.addEventListener("click", async (event) => {
     const el = event.target.closest ? event.target.closest("[data-act]") : null;
     if (!el) return;
     const name = el.getAttribute("data-act");
-    if (!name || name.indexOf("routing") !== 0) return;
+    // pickGroup 是「路由组」页顶部的组标签，不带 routing 前缀，之前被这条前缀过滤整个丢掉
+    if (!name || (name !== "pickGroup" && name.indexOf("routing") !== 0)) return;
+    // 除「重读 / 保存」外的路由编辑动作都算未保存改动，否则下一次轮询读盘会把刚点的改动盖回去
+    if (name.indexOf("routing") === 0 && name !== "routingReload" && name !== "routingSave") {
+      state.routingDraftDirty = true;
+    }
     const d = draft();
     const gi = Number(el.getAttribute("data-g"));
     const i = Number(el.getAttribute("data-i"));
