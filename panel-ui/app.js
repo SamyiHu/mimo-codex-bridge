@@ -1284,7 +1284,19 @@
     return '<div class="cols cols-wide"><div>' +
       card("可用模型", "点一行看上游参数", body, `<span class="k">来自 bridge /v1/models · 共 ${models.length} 个</span>`) +
       aliasCard +
-      '</div><div class="stack">' + detail + "</div></div>";
+      '</div><div class="stack" id="modelDetailPane">' + detail + "</div></div>";
+  }
+
+  /** 只重绘右栏详情：避免整页 render() 让左侧列表闪烁、滚动条跳回顶部 */
+  function refreshModelDetail() {
+    const pane = $("#modelDetailPane");
+    if (!pane) { render(true); return; }
+    const s = state.status || {};
+    const models = s.models || [];
+    const filter = state.filter.toLowerCase();
+    const shown = models.filter((m) => !filter || String(m).toLowerCase().includes(filter));
+    const sel = state.modelSel && shown.includes(state.modelSel) ? state.modelSel : shown[0];
+    pane.innerHTML = modelDetail(s, sel);
   }
 
   const ROW_H = 30;
@@ -1318,14 +1330,20 @@
         el.title = "点击复制 " + items[i];
         el.addEventListener("click", () => {
         state.modelSel = items[i];
-        render(true);
+        paintSelection();
+        refreshModelDetail();
       });
       el.addEventListener("dblclick", () => copyText(items[i]));
         pad.appendChild(el);
         rendered.set(i, el);
       }
       state.modelScroll = top;
+      paintSelection();
     };
+
+    function paintSelection() {
+      for (const [i, el] of rendered) el.classList.toggle("on", items[i] === state.modelSel);
+    }
 
     box.addEventListener("scroll", paint, { passive: true });
     box.scrollTop = state.modelScroll || 0;

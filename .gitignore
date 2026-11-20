@@ -39,3 +39,4 @@ panel.pid
 *.log
 bridge.pid
 panel-console*.log
+.local/
