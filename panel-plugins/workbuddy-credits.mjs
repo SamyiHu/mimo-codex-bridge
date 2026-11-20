@@ -641,9 +641,17 @@ export default {
         <pre id="wbc-checkin-out"></pre>
         <style>
           #wbc-login-box, #wbc-checkin-out { display: none; }
-        .st { font-size: 12px; }
-        .st.err { color: #b91c1c; }
-        .st.warn { color: #b45309; }
+        .st-pill {
+          display: inline-flex; align-items: center; gap: 5px;
+          padding: 2px 10px; border-radius: 999px; line-height: 18px;
+          font-size: 11.5px; font-family: var(--font, inherit);
+          background: var(--pill, #eeeef0); color: var(--fg-2, #404046);
+          border: 1px solid transparent; white-space: nowrap;
+        }
+        .st-pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .75; }
+        .st-pill.err { color: var(--err, #dc2626); background: var(--err-soft, #fdecec); border-color: color-mix(in srgb, var(--err, #dc2626) 22%, transparent); }
+        .st-pill.warn { color: var(--warn, #d97706); background: var(--warn-soft, #fdf3e3); border-color: color-mix(in srgb, var(--warn, #d97706) 22%, transparent); }
+        .st-pill.ok { color: var(--ok, #16a34a); background: var(--ok-soft, #e9f7ee); border-color: color-mix(in srgb, var(--ok, #16a34a) 22%, transparent); }
         #wbc-report-body[hidden] { display: none; }
         #wbc-checkin-out.show { display: block; }
         .ck-sum { display: flex; gap: 14px; align-items: baseline; padding: 4px 2px 10px; font-size: 12.5px; color: var(--muted, #6b7280); }
@@ -746,11 +754,11 @@ async function uiPrompt(label, def) {
           html += '<table class="p-table"><thead><tr><th>账号</th><th class="num">积分</th><th class="num">成功</th><th class="num">台账</th><th>状态</th><th></th></tr></thead><tbody>';
           accs.forEach(function (a, i) {
             var flags =
-              (a.cooling ? '<span class="st warn">冷却中</span>' : "") +
-              (a.disabled ? '<span class="st err" title="网关按失败率自动摘除">自动禁用</span>' : "") +
-              (a.manual_disabled ? '<span class="st err" title="被手动停用">手动停用</span>' : "") +
+              (a.cooling ? '<span class="st-pill warn">冷却中</span>' : "") +
+              (a.disabled ? '<span class="st-pill err" title="网关按失败率自动摘除">自动禁用</span>' : "") +
+              (a.manual_disabled ? '<span class="st-pill err" title="被手动停用">手动停用</span>' : "") +
               ((a.rate_limited_models || []).length
-                ? '<span class="st warn">限流 ' + esc((a.rate_limited_models || []).map(function (x) { return x.model; }).join(" · ")) + "</span>"
+                ? '<span class="st-pill warn">限流 ' + esc((a.rate_limited_models || []).map(function (x) { return x.model; }).join(" · ")) + "</span>"
                 : "");
             var acts =
               (a.manual_disabled ? act("启用", "enable:" + a.uid) : act("停用", "disable:" + a.uid)) +
@@ -762,7 +770,7 @@ async function uiPrompt(label, def) {
               '<td class="num">' + esc(balance) + "</td>" +
               '<td class="num">' + (a.success_count || 0) + "</td>" +
               '<td class="num">' + ((a.model_costs || []).length ? (a.model_costs || []).length + " 模型" : "—") + "</td>" +
-              "<td>" + (flags || '<span class="k">正常</span>') + "</td>" +
+              "<td>" + (flags || '<span class="st-pill ok">正常</span>') + "</td>" +
               '<td class="acts">' + acts + "</td></tr>" +
               '<tr class="ledger-row" data-for="' + i + '" hidden><td colspan="6">' + ledgerInline(a) + "</td></tr>";
           });
