@@ -431,6 +431,11 @@ export default {
         <style>
           #wtr-login-box, #wtr-import-area, #wtr-out { display: none; }
           #wtr-login-box.show, #wtr-import-area.show, #wtr-out.show { display: block; }
+          /* 账号表有 6 个操作胶囊，窄栏里会溢出被裁掉：允许换行、别再压成 1% 宽 */
+          #wtr-accounts table.p-table td.acts { width: auto; white-space: normal; }
+          #wtr-accounts table.p-table td.acts .wtr-act { margin: 3px 5px 3px 0; }
+          #wtr-accounts table.p-table td { vertical-align: top; padding-top: 8px; padding-bottom: 8px; }
+          #wtr-accounts table.p-table td:first-child { min-width: 130px; }
         </style>
       </section>
       <script>
