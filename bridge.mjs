@@ -1139,6 +1139,9 @@ async function fetchUpstreamWithFailover({ urlFor, init, abortContext, requestId
   const tried = [];
   let route = first;
   let lastError = null;
+  // planRetry 的 attempt 从 1 起算 = 当前这家已经试了几次；
+  // 换家要清零，否则下一家会被当成"已经重试过"直接跳过同号退避。
+  let sameRouteAttempts = 1;
   for (let round = 0; round < 8; round += 1) {
     if (!route || !route.base) throw lastError || new Error("没有可用上游");
     const context = currentRoute();
@@ -1168,6 +1171,7 @@ async function fetchUpstreamWithFailover({ urlFor, init, abortContext, requestId
       const next = await routing.pick({ model, session, exclude: tried });
       if (!next.ok) throw error;
       route = next;
+      sameRouteAttempts = 1;
       continue;
     }
 
