@@ -672,6 +672,17 @@ export default {
         .ck-detail { color: var(--muted, #6b7280); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .ck-warn { margin-top: 10px; padding: 9px 12px; border-radius: 8px; background: rgba(220,38,38,.08); color: #b91c1c; font-size: 12.5px; }
         .ck-actions { margin-top: 8px; }
+        #wbc-report-body { max-height: 240px; overflow: auto; }
+        .rp-sum { display: flex; align-items: baseline; gap: 8px; padding: 6px 2px 8px; font-size: 12.5px; color: var(--muted, #6b7280); }
+        .rp-sum b { color: var(--fg, #171717); font-variant-numeric: tabular-nums; font-weight: 600; }
+        .rp-k { font-size: 11.5px; }
+        .rp-time { margin-left: auto; font-size: 11.5px; opacity: .7; }
+        .rp-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        .rp-table th { text-align: left; font-weight: 600; font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted, #6b7280); padding: 6px 8px; border-bottom: 1px solid var(--line-2, #ececef); }
+        .rp-table th.num, .rp-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+        .rp-table td { padding: 6px 8px; border-bottom: 1px solid var(--line-3, #f2f2f5); }
+        .rp-table tr:last-child td { border-bottom: 0; }
+        .rp-fail { color: var(--err, #dc2626); font-size: 11px; }
           #wbc-login-box.show, #wbc-checkin-out.show { display: block; }
         </style>
       </section>
@@ -1003,19 +1014,24 @@ async function uiPrompt(label, def) {
             });
             loadAll();
             if (silent) return;
-            var html =
-              row("积分日报", '<span class="dot ok"></span>剩余 ' + (total.remain != null ? total.remain : "—") +
-                " · 已用 " + (total.used != null ? total.used : "—") +
-                " · 总量 " + (total.size != null ? total.size : "—") +
-                " · " + fetchedAt);
+            var html = '<div class="rp-sum">' +
+              '<span class="rp-k">剩余</span><b>' + (total.remain != null ? total.remain : "—") + "</b>" +
+              '<span class="rp-k">已用</span><b>' + (total.used != null ? total.used : "—") + "</b>" +
+              '<span class="rp-k">总量</span><b>' + (total.size != null ? total.size : "—") + "</b>" +
+              '<span class="rp-time">' + fetchedAt + "</span></div>";
+            html += '<table class="rp-table"><thead><tr><th>账号</th><th class="num">剩余</th><th class="num">已用</th><th class="num">总量</th><th class="num">礼包</th></tr></thead><tbody>';
             accs.forEach(function (a) {
-              html += row(
-                (a.nickname || String(a.uid || "").slice(0, 8)) + (a.ok ? "" : " · 失败"),
-                "剩 " + (a.remain != null ? a.remain : "—") + " / 用 " + (a.used != null ? a.used : "—") +
-                  " / 量 " + (a.size != null ? a.size : "—") + " · 礼包 " + (a.packages != null ? a.packages : "—"),
-              );
+              var name = (a.nickname || String(a.uid || "").slice(0, 8));
+              html += "<tr>" +
+                "<td>" + esc(name) + (a.ok ? "" : ' <span class="rp-fail">失败</span>') + "</td>" +
+                '<td class="num">' + (a.remain != null ? a.remain : "—") + "</td>" +
+                '<td class="num">' + (a.used != null ? a.used : "—") + "</td>" +
+                '<td class="num">' + (a.size != null ? a.size : "—") + "</td>" +
+                '<td class="num">' + (a.packages != null ? a.packages : "—") + "</td>" +
+                "</tr>";
             });
-            body.innerHTML = html;
+            html += "</tbody></table>";
+            setBody(html);
           } catch (e) {
             if (!silent) setBody('<div class="empty"><span class="dot err"></span>' + esc(String(e)) + "</div>");
           } finally {
