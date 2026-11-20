@@ -792,15 +792,14 @@ async function uiPrompt(label, def) {
           var m = raw || {};
           var rate = tr.getAttribute("data-rate");
           var body = '<div class="param-grid">' +
-            miParam("显示名", tr.getAttribute("data-name")) +
-            miParam("倍率", rate ? Number(rate).toFixed(2) + "x / credit" : "") +
-            miParam("会员倍率", tr.getAttribute("data-member")) +
-            miParam("上下文", miCtx(m.context_length || m.max_allowed_size)) +
+            miParam("上下文", m.context_length || m.max_allowed_size) +
             miParam("最大输出", m.max_output_tokens) +
+            miParam("推理强度", m.reasoning_effort) +
             miParam("图片", m.supports_images ? "支持" : "") +
             miParam("工具调用", m.supports_tool_call ? "支持" : "") +
             miParam("vendor", m.vendor || m.owned_by) +
-            '<div class="param wide"><span class="pv" style="opacity:.65">TRAE 网关只回模型 ID / 倍率 / 归属，上下文与最大输出它不提供</span></div>' +
+            miParam("倍率", rate ? Number(rate).toFixed(2) + "x / credit" : "") +
+            miParam("会员倍率", tr.getAttribute("data-member")) +
             (m.description ? '<div class="param wide"><span class="pv">' + esc(m.description) + "</span></div>" : "") +
             "</div>";
           var detailTr = document.createElement("tr");

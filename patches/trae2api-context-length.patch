@@ -1,0 +1,27 @@
+diff --git a/internal/server/handler.go b/internal/server/handler.go
+index 7c348e0..295c8a3 100644
+--- a/internal/server/handler.go
++++ b/internal/server/handler.go
+@@ -304,15 +304,18 @@ func (h *Handler) modelList() []map[string]any {
+ 	if infos := h.fetchDynamicModels(); len(infos) > 0 {
+ 		out := make([]map[string]any, 0, len(infos))
+ 		for _, mi := range infos {
++			// 修复：ContextWindow 是 int64，塞进 interface{} 后与 untyped 0 比较恒为 false，
++			// 导致 fallback 从未生效（/v1/models 全是 context_length: 0）。
++			contextLength := mi.ContextWindow
++			if contextLength <= 0 {
++				contextLength = 131072
++			}
+ 			entry := map[string]any{
+ 				"id":             mi.ID,
+ 				"object":         "model",
+ 				"created":        1753600000,
+ 				"owned_by":       "trae-solo",
+-				"context_length": mi.ContextWindow,
+-			}
+-			if entry["context_length"] == 0 {
+-				entry["context_length"] = 131072
++				"context_length": contextLength,
+ 			}
+ 			out = append(out, entry)
+ 		}
