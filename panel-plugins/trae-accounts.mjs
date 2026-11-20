@@ -455,7 +455,7 @@ async function uiPrompt(label, def) {
           return '<div class="row"><div class="k">' + esc(k) + '</div><div class="v">' + v + "</div></div>";
         }
         function act(label, fn) {
-          return '<button type="button" class="act-link wtr-act" data-act="' + esc(fn) + '">' + esc(label) + "</button>";
+          return '<button type="button" class="wtr-act" data-act="' + esc(fn) + '">' + esc(label) + "</button>";
         }
         function showOut(text) {
           var out = byId("wtr-out");
@@ -769,8 +769,9 @@ async function uiPrompt(label, def) {
           return modelInfoCache;
         }
         function miParam(k, v) {
-          if (v == null || v === "" || v === 0) return "";
-          return '<div class="param"><span class="pk">' + esc(k) + '</span><span class="pv">' + esc(String(v)) + "</span></div>";
+          var empty = (v == null || v === "" || v === 0);
+          return '<div class="param"><span class="pk">' + esc(k) + '</span><span class="pv' + (empty ? " dim" : "") + '">' +
+            esc(empty ? "—" : String(v)) + "</span></div>";
         }
         function miCtx(v) {
           var n = Number(v) || 0;
@@ -792,7 +793,7 @@ async function uiPrompt(label, def) {
           var m = raw || {};
           var rate = tr.getAttribute("data-rate");
           var body = '<div class="param-grid">' +
-            miParam("上下文", m.context_length || m.max_allowed_size) +
+            miParam("上下文", m.context_length || m.max_allowed_size || m.context_window) +
             miParam("最大输出", m.max_output_tokens) +
             miParam("推理强度", m.reasoning_effort) +
             miParam("图片", m.supports_images ? "支持" : "") +

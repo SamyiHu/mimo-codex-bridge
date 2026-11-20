@@ -705,7 +705,7 @@ async function uiPrompt(label, def) {
           return '<div class="row"><div class="k">' + esc(k) + '</div><div class="v">' + v + "</div></div>";
         }
         function act(label, fn) {
-          return '<button type="button" class="act-link wbc-act" data-act="' + esc(fn) + '">' + esc(label) + "</button>";
+          return '<button type="button" class="wbc-act" data-act="' + esc(fn) + '">' + esc(label) + "</button>";
         }
         function poolText(t) {
           if (!t) return "—";
@@ -840,8 +840,9 @@ async function uiPrompt(label, def) {
           });
 
           function param(k, v) {
-            if (v == null || v === "") return "";
-            return '<div class="param"><span class="pk">' + esc(k) + '</span><span class="pv">' + esc(String(v)) + "</span></div>";
+            var empty = (v == null || v === "");
+            return '<div class="param"><span class="pk">' + esc(k) + '</span><span class="pv' + (empty ? " dim" : "") + '">' +
+              esc(empty ? "—" : String(v)) + "</span></div>";
           }
 
           var html = '<table class="wrc-table compact model-list"><thead><tr>' +
@@ -864,6 +865,8 @@ async function uiPrompt(label, def) {
               param("图片", m.supports_images ? "支持" : "不支持") +
               param("工具调用", m.supports_tool_call ? "支持" : "—") +
               param("vendor", m.vendor || m.owned_by) +
+              param("倍率", cred ? cred + "x / credit" : "") +
+              param("会员倍率", "") +
               (m.description ? '<div class="param wide"><span class="pv">' + esc(m.description) + "</span></div>" : "") +
               "</div></td></tr>";
           });
