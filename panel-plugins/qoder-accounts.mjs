@@ -240,6 +240,20 @@ export default {
           <div class="list-scroll" id="qdc-pool"><div class="empty">加载中…</div></div>
           <div class="hint" id="qdc-out"></div>
         </div>
+        <style>
+          #qdc-pool table.p-table { width: 100%; }
+          #qdc-pool table.p-table th { text-align: left; font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line-2); }
+          #qdc-pool table.p-table td { padding: 7px 8px; border-bottom: 1px solid var(--line-3); font-size: 12.5px; }
+          #qdc-pool table.p-table td.acts { width: auto; white-space: nowrap; text-align: right; }
+          .qdc-act { display: inline-flex; align-items: center; height: 20px; padding: 0 10px; margin-left: 4px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--fg-2); font-size: 11px; line-height: 1; white-space: nowrap; cursor: pointer; }
+          .qdc-act:hover { background: var(--pill-hover); border-color: var(--accent-line); color: var(--fg); }
+          .qdc-act.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 32%, transparent); background: var(--err-soft); }
+          .qdc-act.danger:hover { border-color: var(--err); }
+          .qdc-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 10px; border-radius: 999px; font-size: 11.5px; line-height: 18px; }
+          .qdc-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .75; }
+          .qdc-chip.ok { color: var(--ok); background: var(--ok-soft); }
+          .qdc-chip.err { color: var(--err); background: var(--err-soft); }
+        </style>
       </section>
       <script>
       (function () {
@@ -256,17 +270,27 @@ export default {
           var box = byId("qdc-pool");
           if (!d.ok) { box.innerHTML = '<div class="empty">' + esc(d.error || "读取失败") + "</div>"; return; }
           if (!d.accounts.length) { box.innerHTML = '<div class="empty">暂无账号 · 点「登录新账号」</div>'; return; }
-          box.innerHTML = d.accounts.map(function (a) {
-            var exp = a.expiresAt ? new Date(a.expiresAt).toLocaleDateString() : "—";
-            return '<div style="display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line,#eee)">' +
-              '<b>' + esc(a.nickname || a.uid.slice(0, 8)) + '</b>' +
-              '<span class="k">' + esc(a.token) + '</span>' +
-              '<span class="k">到期 ' + esc(exp) + '</span>' +
-              '<span class="grow"></span>' +
-              '<button class="btn sm quiet" data-toggle="' + esc(a.uid) + '" data-dis="' + (a.disabled ? "1" : "0") + '">' + (a.disabled ? "启用" : "停用") + '</button>' +
-              '<button class="btn sm quiet" data-del="' + esc(a.uid) + '">删除</button>' +
-              "</div>";
-          }).join("");
+                    var html = '<table class="p-table"><thead><tr><th>账号</th><th>到期</th><th>状态</th><th></th></tr></thead><tbody>';
+          d.accounts.forEach(function (a) {
+            var exp = a.expiresAt ? new Date(a.expiresAt).toLocaleDateString("zh-CN") : "—";
+            var chip = a.disabled
+              ? '<span class="qdc-chip err">已停用</span>'
+              : '<span class="qdc-chip ok">正常</span>';
+            var nameCell = a.nickname
+              ? esc(a.nickname) + ' <span class="k">' + esc(a.uid.slice(0, 8)) + '</span>'
+              : esc(a.uid.slice(0, 8));
+            html += '<tr class="acc-row"><td>' +
+              nameCell +
+              ' <span class="k">' + esc(a.token) + '</span></td>' +
+              '<td class="k">' + esc(exp) + '</td>' +
+              '<td>' + chip + '</td>' +
+              '<td class="acts">' +
+                '<button type="button" class="qdc-act" data-toggle="' + esc(a.uid) + '" data-dis="' + (a.disabled ? "1" : "0") + '">' + (a.disabled ? "启用" : "停用") + '</button>' +
+                '<button type="button" class="qdc-act danger" data-del="' + esc(a.uid) + '">删除</button>' +
+              '</td></tr>';
+          });
+          html += "</tbody></table>";
+          box.innerHTML = html;
           box.querySelectorAll("[data-toggle]").forEach(function (b) {
             b.onclick = async function () { await api("/accounts/toggle", { uid: b.dataset.toggle, disabled: b.dataset.dis === "1" ? true : false }); load(); };
           });
