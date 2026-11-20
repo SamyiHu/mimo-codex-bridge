@@ -61,12 +61,35 @@ function loadAccounts() {
   } catch { return []; }
 }
 
-function loadModels() {
+/** 读 ~/.qoder2api/models.json（Qoder 官方模型目录快照），返回规范化条目 */
+function loadCatalog() {
   try {
     const raw = JSON.parse(fs.readFileSync(MODELS_FILE, "utf8"));
-    if (Array.isArray(raw) && raw.length) return raw.map(String);
-  } catch { /* 用默认 */ }
-  return DEFAULT_MODELS;
+    const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.models) ? raw.models : []);
+    const out = list
+      .filter((m) => m && m.key && m.enable !== false)
+      .map((m) => ({
+        key: String(m.key),
+        name: String(m.display_name || m.key),
+        source: String(m.source || "system"),
+        isReasoning: Boolean(m.is_reasoning),
+        isVl: Boolean(m.is_vl),
+        maxInput: Number(m.max_input_tokens) || 0,
+        free: Boolean(m.is_free),
+        priceFactor: Number(m.price_factor) || 0,
+      }));
+    if (out.length) return out;
+  } catch { /* 回落到默认 */ }
+  return DEFAULT_MODELS.map((name) => ({ key: name, name, source: "system", isReasoning: false, isVl: false, maxInput: 0, free: false, priceFactor: 0 }));
+}
+
+/** 请求里的 model 可能是显示名，也可能是内部 key */
+function resolveModel(id) {
+  const catalog = loadCatalog();
+  const target = String(id || "").trim();
+  return catalog.find((m) => m.name === target || m.key === target)
+    || catalog.find((m) => m.name.toLowerCase() === target.toLowerCase())
+    || { key: target, name: target, source: "system", isReasoning: false, isVl: false, maxInput: 0, free: false, priceFactor: 0 };
 }
 
 function authorized(req) {
@@ -153,6 +176,7 @@ async function handleChat(req, res) {
     ? { enable: body.reasoning_effort !== "none", effort: body.reasoning_effort }
     : (body.enable_thinking === false ? { enable: false } : null);
 
+  const selected = resolveModel(model);
   const accounts = pickAccounts();
   if (!accounts.length) {
     return sendJson(res, 503, { error: { message: "没有可用的 Qoder 账号，请先在面板「Qoder 账号」登录", type: "no_account" } });
@@ -166,16 +190,21 @@ async function handleChat(req, res) {
       let upstreamRes;
       try {
         const upstreamBody = buildQoderChatBody({
-          upstreamKey: model,
+          upstreamKey: selected.key,
           messages,
           tools: body.tools,
           maxTokens: body.max_tokens,
           thinking,
           userId: account.uid,
           sessionSeed: body.user || body.session_id || null,
-          modelConfig: { is_reasoning: Boolean(thinking && thinking.enable) },
+          modelConfig: { is_reasoning: selected.isReasoning, is_vl: selected.isVl, source: selected.source, format: "openai" },
         });
-        upstreamRes = await openQoderStream({ account, body: upstreamBody });
+        upstreamRes = await openQoderStream({
+          account,
+          body: upstreamBody,
+          modelKey: selected.key,
+          modelSource: selected.source,
+        });
       } catch (error) {
         const decision = planRetry({ status: 0, body: String(error.message || error), attempt, hasAlternative });
         lastError = error;
@@ -195,7 +224,7 @@ async function handleChat(req, res) {
           retryAfterMs: parseRetryAfter(upstreamRes.headers.get("retry-after")),
         });
         lastError = new Error("Qoder HTTP " + upstreamRes.status + "：" + text.slice(0, 200));
-        log("chat 失败", account.uid, upstreamRes.status, decision.kind, decision.action);
+        log("chat 失败", account.uid, selected.key, upstreamRes.status, decision.kind, decision.action);
         if (decision.action === "retry_same") { await new Promise((r) => setTimeout(r, decision.delayMs)); continue; }
         if (decision.action === "switch") break;
         return sendJson(res, upstreamRes.status, { error: { message: lastError.message, type: decision.kind } });
@@ -292,10 +321,21 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
   if (url.pathname === "/healthz") {
     const accounts = loadAccounts();
-    return sendJson(res, 200, { ok: true, accounts: accounts.length, models: loadModels().length });
+    return sendJson(res, 200, { ok: true, accounts: accounts.length, models: loadCatalog().length });
   }
   if (url.pathname === "/v1/models") {
-    const data = loadModels().map((id) => ({ id, object: "model", created: 0, owned_by: "qoder" }));
+    const data = loadCatalog().map((m) => ({
+      id: m.name,
+      object: "model",
+      created: 0,
+      owned_by: "qoder",
+      qoder_key: m.key,
+      context_length: m.maxInput || undefined,
+      is_free: m.free || undefined,
+      price_factor: m.priceFactor || undefined,
+      supports_images: m.isVl || undefined,
+      supports_reasoning: m.isReasoning || undefined,
+    }));
     return sendJson(res, 200, { object: "list", data });
   }
   if (url.pathname === "/v1/chat/completions") {

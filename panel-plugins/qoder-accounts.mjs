@@ -186,31 +186,46 @@ export default {
     });
 
     // 每日活动签到：GET campaigns → 找 CREDITS 类型未领取的活动 → POST claim（幂等）
-    registerRoute("POST", "/checkin", async (req, res, { json }) => {
+        registerRoute("POST", "/checkin", async (req, res, { json }) => {
       const accounts = loadAccounts().filter((a) => !a.account.disabled);
+      const now = Math.floor(Date.now() / 1000);
       const results = [];
       for (const rec of accounts) {
         const uid = rec.account.uid;
         try {
           const r = await qoderFetch(rec, "/sash/api/v1/me/campaigns");
           const payload = await r.json().catch(() => null);
-          const list = (payload && (payload.data || payload.campaigns || payload)) || [];
+          const list = (payload && (payload.data || payload.campaigns || payload.campaignsList)) || [];
           const campaigns = Array.isArray(list) ? list : [];
-          const targets = campaigns.filter((c) => {
-            const benefit = c && c.benefit ? String(c.benefit.kind || "").toUpperCase() : "";
-            const status = String((c && c.claimStatus) || "").toUpperCase();
-            return benefit === "CREDITS" && status !== "CLAIMED";
-          });
+          const inWindow = (c) => {
+            const s0 = Number(c && (c.startAt ?? c.start_at));
+            const e0 = Number(c && (c.endAt ?? c.end_at));
+            if (!Number.isFinite(s0) || !Number.isFinite(e0)) return false;
+            return now >= s0 && now <= e0;
+          };
+          const isCredit = (c) => String((c && c.benefit && c.benefit.kind) || "").toUpperCase() === "CREDITS";
+          const isBenefit = (c) => String((c && c.actionType) || "").toUpperCase() === "CLAIM_BENEFIT";
+          const statusOf = (c) => String((c && (c.claimStatus || c.claim_status)) || "").toUpperCase();
+          // 对齐 TraeWorkAssistant：优先「可领取」，其次对窗口内 CLAIMED 的 grant
+          // 幂等重发 claim（服务端 replayed=true 才算真已领，避免批次窗口误判）。
+          let targets = campaigns.filter((c) => isCredit(c) && statusOf(c) === "CLAIMABLE" && inWindow(c));
+          if (!targets.length) targets = campaigns.filter((c) => isCredit(c) && statusOf(c) === "CLAIMED" && inWindow(c));
+          if (!targets.length) targets = campaigns.filter((c) => isCredit(c) && isBenefit(c) && inWindow(c));
+          let claimed = 0, replayed = 0, failed = 0;
           for (const c of targets.slice(0, 3)) {
             const id = c.campaignId || c.id;
             if (!id) continue;
-            await qoderFetch(rec, "/sash/api/v1/me/campaigns/" + encodeURIComponent(id) + "/claim", {
+            const cr = await qoderFetch(rec, "/sash/api/v1/me/campaigns/" + encodeURIComponent(id) + "/claim", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: "{}",
             });
+            const body = await cr.json().catch(() => null);
+            if (!cr.ok) { failed++; continue; }
+            if (body && (body.replayed === true || (body.data && body.data.replayed === true))) replayed++;
+            else claimed++;
           }
-          results.push({ uid, ok: true, campaigns: campaigns.length, claimed: targets.length });
+          results.push({ uid, ok: true, campaigns: campaigns.length, claimable: campaigns.filter((c)=>statusOf(c)==="CLAIMABLE").length, claimed, replayed, failed });
         } catch (e) {
           results.push({ uid, ok: false, error: String(e.message || e) });
         }

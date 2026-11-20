@@ -122,7 +122,7 @@ export function slimModelConfig(config, upstreamKey) {
 }
 
 /** 发一次 Qoder 对话请求，返回 fetch Response（SSE） */
-export async function openQoderStream({ account, body, signal, timeoutMs = 300000 }) {
+export async function openQoderStream({ account, body, signal, timeoutMs = 300000, modelKey = "", modelSource = "system" }) {
   const encoded = encodeBody(Buffer.from(JSON.stringify(body), "utf8"));
   const headers = buildCosyHeaders(encoded, QODER_CHAT_URL, {
     userId: account.uid,
@@ -134,9 +134,12 @@ export async function openQoderStream({ account, body, signal, timeoutMs = 30000
   const res = await fetch(QODER_CHAT_URL, {
     method: "POST",
     headers: Object.assign({}, headers, {
-      "Content-Type": "application/octet-stream",
+      "Content-Type": "application/json",
       Accept: "text/event-stream",
       "User-Agent": CLIENT_UA,
+      // 上游按这两个头选模型：x-model-key 是目录里的内部 key（qmodel_38max），不是显示名
+      ...(modelKey ? { "x-model-key": modelKey } : {}),
+      "x-model-source": modelSource || "system",
     }),
     body: encoded,
     signal: signal || AbortSignal.timeout(timeoutMs),
