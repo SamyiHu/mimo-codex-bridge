@@ -807,6 +807,7 @@ async function uiPrompt(label, def) {
           detailTr.className = "model-detail";
           detailTr.innerHTML = '<td colspan="4">' + body + "</td>";
           tr.parentNode.insertBefore(detailTr, tr.nextSibling);
+          tr.classList.add("open");
         }
 
         // 模型倍率：直连上游解析的 consumption_rate，按倍率降序（贵的在上）
@@ -821,12 +822,12 @@ async function uiPrompt(label, def) {
             }
             var html = '<div class="wtr-hint">消耗倍率来自 TRAE 模型目录 · ' +
               d.models.length + " 个模型 · 贵的在前 · 会员列为 TRAE 会员折后价</div>";
-            html += '<table class="wtr-table"><thead><tr><th>模型</th><th>名称</th><th>倍率</th><th>会员</th></tr></thead><tbody>';
+            html += '<table class="wtr-table model-list"><thead><tr><th>模型</th><th>名称</th><th>倍率</th><th>会员</th></tr></thead><tbody>';
             d.models.forEach(function (m) {
               var member = m.memberRate != null
                 ? Number(m.memberRate).toFixed(2) + "x" + (m.matched ? " ✓" : "")
                 : "—";
-              html += '<tr class="rate-row" data-model="trae/' + esc(m.id) + '" data-name="' + esc(m.name || "") + '" data-rate="' + esc(m.rate) + '" data-member="' + esc(member === "—" ? "" : member) + '" title="点击看这个模型的上游参数"><td>' + esc(m.id) + "</td><td>" + esc(m.name || "—") +
+              html += '<tr class="rate-row model-row" data-model="trae/' + esc(m.id) + '" data-name="' + esc(m.name || "") + '" data-rate="' + esc(m.rate) + '" data-member="' + esc(member === "—" ? "" : member) + '" title="点击看这个模型的上游参数"><td>' + esc(m.id) + "</td><td>" + esc(m.name || "—") +
                 '</td><td class="num">' + Number(m.rate).toFixed(2) + "x</td>" +
                 '<td class="num">' + member + "</td></tr>";
             });
