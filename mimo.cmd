@@ -6,6 +6,6 @@ set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" (
   echo.
   echo [exit %RC%] see the message above.
-  pause
+  if not "%MIMO_NO_PAUSE%"=="1" pause
 )
 exit /b %RC%

@@ -162,9 +162,29 @@ async function startAll() {
   openPanel();
 }
 
+// 菜单输入：stdin 关闭（双击窗口被关掉、管道断开、EOF）时必须当成"退出"，
+// 不能让 question() 的 Promise 永远挂起——顶层 await 挂起会让 Node 以 exit 13 结束，
+// 再叠上 Windows 控制台句柄已关，就是"双击闪退"。
 async function menu() {
+  if (!process.stdin.isTTY && process.stdin.readableEnded) {
+    console.log("没有可用的控制台输入，直接退出。用 mimo start / status / stop 这样的命令式参数。");
+    return;
+  }
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ask = (q) => new Promise((res) => rl.question(q, res));
+  let stdinClosed = false;
+  rl.on("close", () => { stdinClosed = true; });
+  const ask = (q) => new Promise((res) => {
+    if (stdinClosed) { res(""); return; }
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; rl.off("close", onClose); res(v); };
+    const onClose = () => finish("");
+    rl.once("close", onClose);
+    try {
+      rl.question(q, (answer) => finish(answer));
+    } catch {
+      finish("");
+    }
+  });
   try {
     for (;;) {
       console.log("\n==== MiMo 桥 ====");
@@ -173,7 +193,7 @@ async function menu() {
       console.log("4) 状态    5) 日志    6) 自检 doctor");
       console.log("0) 退出");
       const k = (await ask("选择 ")).trim();
-      if (k === "0") return;
+      if (k === "0" || k === "") return;
       if (k === "1") await startAll();
       else if (k === "2") { await stopPanel(); stopBridge(); await sleep(500); await startAll(); }
       else if (k === "3") { await stopPanel(); stopBridge(); await showStatus(); }
