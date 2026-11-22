@@ -869,17 +869,6 @@ kbd {
 .param.wide { grid-column: 1 / -1; }
 .param.wide .pv { white-space: normal; }
 
-.plugin-card .act-link {
-  border: 0; background: transparent; padding: 0; margin-left: 12px;
-  color: var(--accent); font: inherit; font-size: 12px; cursor: pointer;
-  text-decoration: none; border-bottom: 1px solid transparent;
-  transition: border-color .12s ease;
-}
-.plugin-card .act-link:hover { border-bottom-color: var(--accent); }
-.plugin-card .act-link.danger { color: var(--err); }
-.plugin-card .act-link.danger:hover { border-bottom-color: var(--err); }
-.plugin-card .act-link.muted { color: var(--warn); }
-
 /* 倍率区：紧凑表格 + 折叠的未使用模型 */
 .plugin-card .rate-note { color: var(--faint); font-size: 10.5px; padding: 6px 12px 2px; }
 .plugin-card table.wrc-table.compact { font-size: 11.5px; }
