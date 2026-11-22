@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
+import "./isolate.mjs";
 
 const projectDir = path.resolve(import.meta.dirname, "..");
 
