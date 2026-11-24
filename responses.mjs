@@ -202,9 +202,73 @@ const HOSTED_TOOL_TYPES = new Set([
   "mcp",
 ]);
 
+/**
+ * Codex 会把工具分组进非标准 `namespace` 容器（`multi_agent_v1`、`mcp__cua_repl` …），
+ * 并按「工具名 + namespace」二元组派发。OpenAI 兼容上游只认扁平 function，
+ * 所以这里把容器摊平：子工具名改成 `<namespace>__<tool>`，同时记下还原映射。
+ * 不按容器名过滤任何一组——Codex 用默认组解析无 namespace 的调用，丢了会串组。
+ */
+const TOOL_NAMESPACE_SEPARATOR = "__";
+
+export function expandNamespacedTools(tools) {
+  const expanded = [];
+  const namespaces = new Map(); // qualified -> { namespace, name }
+  for (const tool of tools ?? []) {
+    if (!tool || typeof tool !== "object") continue;
+    if (tool.type !== "namespace" || !Array.isArray(tool.tools)) {
+      expanded.push(tool);
+      continue;
+    }
+    const ns = String(tool.name ?? "").trim();
+    if (!ns) continue;
+    for (const child of tool.tools) {
+      if (!child || typeof child !== "object") continue;
+      const fn = child.function ?? child;
+      const name = String(fn.name ?? "").trim();
+      if (!name) continue;
+      const qualified = ns + TOOL_NAMESPACE_SEPARATOR + name;
+      namespaces.set(qualified, { namespace: ns, name });
+      expanded.push({
+        type: "function",
+        name: qualified,
+        description: fn.description ?? tool.description ?? "",
+        ...(fn.parameters ? { parameters: fn.parameters } : {}),
+        ...(fn.strict !== undefined ? { strict: fn.strict } : {}),
+      });
+    }
+  }
+  return { tools: expanded, namespaces };
+}
+
+/** 取一条 Responses 请求的 namespace 还原表（没有 namespace 容器时为空表）。 */
+export function namespaceMapOf(requestBody) {
+  return expandNamespacedTools(requestBody?.tools).namespaces;
+}
+
+/**
+ * 把上游回来的扁平工具名还原成 Codex 要的 (name, namespace)。
+ * 精确命中优先；否则接受「裸子工具名」，但只在唯一归属时才还原——多家抢同一个
+ * 裸名时猜错就是串组，宁可不带 namespace 让它落到默认组。
+ */
+export function resolveToolName(namespaces, name) {
+  const raw = String(name ?? "");
+  if (!namespaces || namespaces.size === 0) return { name: raw };
+  const exact = namespaces.get(raw);
+  if (exact) return { name: exact.name, namespace: exact.namespace };
+  let hit = null;
+  let claims = 0;
+  for (const [, entry] of namespaces) {
+    if (entry.name === raw) {
+      hit = entry;
+      claims += 1;
+    }
+  }
+  return claims === 1 ? { name: hit.name, namespace: hit.namespace } : { name: raw };
+}
+
 function toChatTools(tools, options = {}) {
   const kept = [];
-  for (const tool of tools ?? []) {
+  for (const tool of expandNamespacedTools(tools).tools) {
     if (!tool || typeof tool !== "object") continue;
     if (HOSTED_TOOL_TYPES.has(String(tool.type ?? ""))) {
       options.onDroppedTool?.(String(tool.type));
@@ -401,7 +465,11 @@ export function toChatRequest(body, options = {}) {
           id: item.call_id || item.id || uid("call_"),
           type: "function",
           function: {
-            name: item.name,
+            // 回灌历史：Codex 记的是裸名 + namespace，上游只认展平名，这里拼回去，
+            // 否则模型会在历史里看到"自己调过一个上游没提供过的工具"。
+            name: item.namespace
+              ? item.namespace + TOOL_NAMESPACE_SEPARATOR + item.name
+              : item.name,
             arguments:
               typeof item.arguments === "string"
                 ? item.arguments
@@ -735,7 +803,11 @@ function repairOrAddToolCalls(response, calls, requestBody, onAdd = null) {
             arguments: JSON.stringify(call.parameters),
           }),
       call_id: uid("call_"),
-      name: call.name,
+      name: resolveToolName(namespaceMapOf(requestBody), call.name).name,
+      ...(() => {
+        const ns = resolveToolName(namespaceMapOf(requestBody), call.name).namespace;
+        return ns ? { namespace: ns } : {};
+      })(),
       status: "completed",
     };
     response.output.push(item);
@@ -991,11 +1063,16 @@ export function toResponseObject(chatResponse, requestBody) {
         status: "completed",
       });
     } else {
+      const resolved = resolveToolName(
+        namespaceMapOf(requestBody),
+        toolCall.function?.name,
+      );
       response.output.push({
         type: "function_call",
         id: uid("fc_"),
         call_id: toolCall.id,
-        name: toolCall.function?.name,
+        name: resolved.name,
+        ...(resolved.namespace ? { namespace: resolved.namespace } : {}),
         arguments: toolCall.function?.arguments ?? "{}",
         status: "completed",
       });
@@ -1381,6 +1458,12 @@ export function createResponseStreamTranslator(requestBody, options = {}) {
           customToolNames.has(incomingToolName);
 
         if (!item) {
+          const streamResolved = isCustom
+            ? { name: incomingToolName ?? "" }
+            : resolveToolName(
+                namespaceMapOf(requestBody),
+                chunkToolCall.function?.name ?? "",
+              );
           item = isCustom
             ? {
                 type: "custom_tool_call",
@@ -1395,7 +1478,10 @@ export function createResponseStreamTranslator(requestBody, options = {}) {
                 type: "function_call",
                 id: uid("fc_"),
                 call_id: chunkToolCall.id || uid("call_"),
-                name: chunkToolCall.function?.name ?? "",
+                name: streamResolved.name,
+                ...(streamResolved.namespace
+                  ? { namespace: streamResolved.namespace }
+                  : {}),
                 arguments: "",
                 status: "in_progress",
               };
@@ -1414,7 +1500,14 @@ export function createResponseStreamTranslator(requestBody, options = {}) {
         if (chunkToolCall.id) item.call_id = chunkToolCall.id;
         const incomingName =
           chunkToolCall.custom?.name ?? chunkToolCall.function?.name;
-        if (incomingName) item.name = incomingName;
+        if (incomingName) {
+          // 名字后到时同样要还原：上游发的是 <namespace>__<tool>，Codex 只认裸名 + namespace。
+          const laterResolved = isCustom
+            ? { name: incomingName }
+            : resolveToolName(namespaceMapOf(requestBody), incomingName);
+          item.name = laterResolved.name;
+          if (laterResolved.namespace) item.namespace = laterResolved.namespace;
+        }
 
         if (item.type === "custom_tool_call") {
           const inputDelta =

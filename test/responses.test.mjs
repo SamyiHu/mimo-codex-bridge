@@ -750,3 +750,219 @@ test("stream translator hides textual tool calls and repairs the final arguments
     max_output_tokens: 5000,
   });
 });
+// ── Codex namespace 工具：展平 + 回程还原 ───────────────────────────────
+// Codex 把工具分组进非标准 namespace 容器（multi_agent_v1 / mcp__xxx），按
+// (name, namespace) 二元组派发。旧实现把容器当普通函数、丢掉里面的 tools 数组，
+// 上游只看到一个无参数的 multi_agent_v1 —— 子代理工具形同不存在。
+
+function namespacedRequestBody(extraTools = []) {
+  return {
+    model: "mimo-pro",
+    instructions: "sys",
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "hi" }],
+      },
+    ],
+    tools: [
+      { type: "function", name: "exec_command", parameters: { type: "object", properties: { cmd: { type: "string" } } } },
+      ...extraTools,
+      {
+        type: "namespace",
+        name: "multi_agent_v1",
+        description: "Tools for spawning and managing sub-agents.",
+        tools: [
+          {
+            type: "function",
+            name: "spawn_agent",
+            description: "Spawn a sub-agent",
+            parameters: {
+              type: "object",
+              properties: { message: { type: "string" } },
+              required: ["message"],
+            },
+          },
+          {
+            type: "function",
+            name: "wait_agent",
+            parameters: { type: "object", properties: { targets: { type: "array" } } },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+test("flattens namespace containers into qualified function tools", () => {
+  const chat = toChatRequest(namespacedRequestBody(), {});
+  const names = chat.tools.map((tool) => tool.function.name);
+  assert.deepEqual(names, [
+    "exec_command",
+    "multi_agent_v1__spawn_agent",
+    "multi_agent_v1__wait_agent",
+  ]);
+  // 子工具的 parameters 必须保留：丢掉就等于没告诉模型怎么调。
+  const spawn = chat.tools[1].function;
+  assert.deepEqual(spawn.parameters.required, ["message"]);
+  assert.equal(spawn.description, "Spawn a sub-agent");
+});
+
+test("keeps same-named tools in different namespaces distinct", () => {
+  const chat = toChatRequest(
+    namespacedRequestBody([
+      {
+        type: "namespace",
+        name: "mcp__cua_repl",
+        tools: [{ type: "function", name: "js", parameters: { type: "object", properties: {} } }],
+      },
+    ]),
+    {},
+  );
+  const names = chat.tools.map((tool) => tool.function.name);
+  assert.ok(names.includes("multi_agent_v1__wait_agent"));
+  assert.ok(names.includes("mcp__cua_repl__js"));
+});
+
+test("restores namespace on non-streaming function_call", () => {
+  const requestBody = namespacedRequestBody();
+  const response = toResponseObject(
+    {
+      choices: [
+        {
+          finish_reason: "tool_calls",
+          message: {
+            tool_calls: [
+              {
+                id: "call_1",
+                function: {
+                  name: "multi_agent_v1__spawn_agent",
+                  arguments: '{"message":"go"}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+      usage: { prompt_tokens: 3, completion_tokens: 2 },
+    },
+    requestBody,
+  );
+  const call = response.output.find((item) => item.type === "function_call");
+  assert.equal(call.name, "spawn_agent");
+  assert.equal(call.namespace, "multi_agent_v1");
+});
+
+test("restores namespace when upstream returns the bare sub-tool name", () => {
+  const response = toResponseObject(
+    {
+      choices: [
+        {
+          finish_reason: "tool_calls",
+          message: {
+            tool_calls: [
+              { id: "c1", function: { name: "spawn_agent", arguments: "{}" } },
+            ],
+          },
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    },
+    namespacedRequestBody(),
+  );
+  const call = response.output.find((item) => item.type === "function_call");
+  assert.equal(call.name, "spawn_agent");
+  assert.equal(call.namespace, "multi_agent_v1");
+});
+
+test("does not guess a namespace for plain or ambiguous tool names", () => {
+  const requestBody = namespacedRequestBody([
+    {
+      type: "namespace",
+      name: "mcp__other",
+      tools: [{ type: "function", name: "wait_agent", parameters: { type: "object", properties: {} } }],
+    },
+  ]);
+  const response = toResponseObject(
+    {
+      choices: [
+        {
+          finish_reason: "tool_calls",
+          message: {
+            tool_calls: [
+              { id: "c1", function: { name: "exec_command", arguments: "{}" } },
+              // wait_agent 被两个 namespace 同时声明：猜错就是串组，宁可不带。
+              { id: "c2", function: { name: "wait_agent", arguments: "{}" } },
+            ],
+          },
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    },
+    requestBody,
+  );
+  const calls = response.output.filter((item) => item.type === "function_call");
+  assert.equal(calls[0].namespace, undefined);
+  assert.equal(calls[1].namespace, undefined);
+});
+
+test("re-qualifies namespaced calls when replaying history", () => {
+  const chat = toChatRequest(
+    {
+      ...namespacedRequestBody(),
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "spawn_agent",
+          namespace: "multi_agent_v1",
+          arguments: "{}",
+        },
+        { type: "function_call_output", call_id: "call_1", output: "done" },
+      ],
+    },
+    {},
+  );
+  const assistant = chat.messages.find(
+    (message) => Array.isArray(message.tool_calls) && message.tool_calls.length,
+  );
+  // 历史里的调用名必须与上游工具表一致，否则模型会看到"自己调过不存在的工具"。
+  assert.equal(assistant.tool_calls[0].function.name, "multi_agent_v1__spawn_agent");
+});
+
+test("restores namespace in the streaming translator", () => {
+  const translator = createResponseStreamTranslator(namespacedRequestBody());
+  const events = [
+    ...translator.start(),
+    ...translator.push({
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: "call_1",
+                function: {
+                  name: "multi_agent_v1__spawn_agent",
+                  arguments: '{"message":"go"}',
+                },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    }),
+    ...translator.end(),
+  ];
+  const completed = eventPayloads(events).find(
+    (item) => item.type === "response.completed",
+  );
+  const call = completed.response.output.find(
+    (item) => item.type === "function_call",
+  );
+  assert.equal(call.name, "spawn_agent");
+  assert.equal(call.namespace, "multi_agent_v1");
+});
