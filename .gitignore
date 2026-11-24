@@ -40,3 +40,4 @@ panel.pid
 bridge.pid
 panel-console*.log
 .local/
+.e2e/
