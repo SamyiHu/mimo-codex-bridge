@@ -621,6 +621,8 @@ export default {
           <div class="pblock pane">
             <div class="pblock-head">模型倍率 <span class="k">点行看参数</span></div>
             <div class="list-scroll" id="wbc-rates"><div class="empty">模型倍率加载中…</div></div>
+            <div class="pblock-head">选号预览 <span class="k">下一单大概率派给谁</span></div>
+            <div id="wbc-pick" class="pick-preview"><div class="empty">加载中…</div></div>
           </div>
         </div>
         <div id="wbc-login-box">
@@ -681,6 +683,20 @@ export default {
         .rp-table tr:last-child td { border-bottom: 0; }
         .rp-fail { color: var(--err, #dc2626); font-size: 11px; }
           #wbc-login-box.show, #wbc-checkin-out.show { display: block; }
+
+        /* 选号预览：把网关「免费层优先 → 权重抽签」的口径摊开，一眼看出下一单派给谁 */
+        .pick-preview { padding: 2px 12px 4px; display: flex; flex-direction: column; gap: 5px; }
+        .pk-row { display: grid; grid-template-columns: minmax(56px, 1fr) 38px minmax(52px, 1.2fr) 40px 46px 62px;
+                  gap: 7px; align-items: center; font-size: 11.5px; }
+        .pk-row.head { color: var(--muted, #6b7280); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
+        .pk-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .pk-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .pk-bar { position: relative; height: 7px; border-radius: 4px; background: rgba(127,127,127,.16); overflow: hidden; }
+        .pk-bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px;
+                    background: linear-gradient(90deg, #7db1fe, #4f7dfb); }
+        .pk-row.dim { opacity: .42; }
+        .pk-note { padding: 0 12px 10px; color: var(--muted, #6b7280); font-size: 10.5px; line-height: 1.65; }
+        .pk-cool { font-size: 10.5px; color: #b45309; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         </style>
       </section>
       <script>
@@ -914,11 +930,111 @@ async function uiPrompt(label, def) {
           el.innerHTML = html;
         }
 
+        // ── 选号预览 ─────────────────────────────────────────────────────────
+        // 复刻网关 internal/pool/pick.go 的口径，让「下一单大概率派给谁」在面板上可见：
+        //   1. 硬过滤：停用、冷却中、在途满额（max_in_flight）、熔断中
+        //   2. 成本分层：免费(实测 0) > 未观测 > 收费，只保留最优层（tier 硬过滤）
+        //   3. 权重 w = 1 + credits/最大credits×10 + 快过期占比×8 + 闲置(0.5/h，上限5)
+        //   4. 归一化成概率（网关是加权抽签，这里给期望值）
+        // 面板拿不到 lastUsed / creditsExpiring，闲置与快过期项按 0 算 → 保守估计。
+        var MAX_IN_FLIGHT = 3;
+        var COST_TTL_MS = 6 * 3600 * 1000; // 账本 6 小时过期（entry.go modelCostTTL）
+        function costOf(a) {
+          var mc = (a && a.model_costs) || [];
+          if (!mc.length) return { tier: 1, cost: null };
+          var fresh = mc.filter(function (m) {
+            var t = Date.parse(m.last_seen || "");
+            return Number.isFinite(t) && Date.now() - t < COST_TTL_MS;
+          });
+          if (!fresh.length) return { tier: 1, cost: null };
+          var best = fresh.reduce(function (x, y) {
+            return Number(y.cost_per_1k || 0) < Number(x.cost_per_1k || 0) ? y : x;
+          });
+          var c = Number(best.cost_per_1k || 0);
+          return { tier: c <= 0 ? 0 : 2, cost: c };
+        }
+        function renderPick(statusData) {
+          var el = byId("wbc-pick");
+          if (!el) return;
+          var accs = (statusData && statusData.ok && statusData.status && statusData.status.accounts) || [];
+          if (!accs.length) { el.innerHTML = '<div class="k">账号池不可达</div>'; return; }
+          var rows = accs.map(function (a) {
+            var c = costOf(a);
+            var why = null;
+            if (a.disabled) why = "自动禁用";
+            else if (a.manual_disabled) why = "手动停用";
+            else if (a.cooling) why = "冷却中" + (a.reason ? "（" + a.reason + "）" : "");
+            else if (Number(a.in_flight || 0) >= MAX_IN_FLIGHT) why = "在途满额";
+            else if (Number(a.breaker_fails || 0) > 0 && Date.parse(a.breaker_until || "") > Date.now()) why = "熔断中";
+            return { a: a, tier: c.tier, cost: c.cost, why: why };
+          });
+          var alive = rows.filter(function (r) { return !r.why; });
+          var out = rows.filter(function (r) { return r.why; });
+          if (!alive.length) {
+            el.innerHTML = '<div class="pk-note">当前没有可用账号：' +
+              (out.map(function (r) { return esc(r.a.nickname || "") + " " + esc(r.why); }).join("；") || "池为空") + "</div>";
+            return;
+          }
+          var bestTier = Math.min.apply(null, alive.map(function (r) { return r.tier; }));
+          var pool = alive.filter(function (r) { return r.tier === bestTier; });
+          var maxCredits = Math.max.apply(null, alive.map(function (r) { return Number(r.a.credits || 0); }).concat([0]));
+          pool.forEach(function (r) {
+            var w = 1;
+            if (maxCredits > 0) w += (Number(r.a.credits || 0) / maxCredits) * 10;
+            r.w = w;
+          });
+          // 网关顺序：先按 cost1k 升序，再按权重降序，截断 top5 后才抽签（pick.go:167-187）。
+          // 面板复刻这个截断，否则 6+ 个号时概率会算错。
+          pool.sort(function (x, y) {
+            var cx = x.cost == null ? 0 : x.cost, cy = y.cost == null ? 0 : y.cost;
+            if (cx !== cy) return cx - cy;
+            if (y.w !== x.w) return y.w - x.w;
+            return String(x.a.uid) < String(y.a.uid) ? -1 : 1;
+          });
+          var dropped = pool.slice(5);
+          pool = pool.slice(0, 5);
+          var total = pool.reduce(function (s, r) { return s + r.w; }, 0);
+          pool.forEach(function (r) { r.p = total > 0 ? r.w / total : 0; });
+          // 展示按概率降序（网关内部是先按单价再按权重排序后抽签，抽签只看权重，
+          // 所以概率才是"下一单派给谁"的正确排序口径）。
+          pool.sort(function (x, y) { return y.p - x.p; });
+          var tierText = bestTier === 0 ? "免费层优先" : bestTier === 1 ? "暂无成本观测，等权重" : "收费层（单价低者优先）";
+          var html = '<div class="pk-row head"><span>账号</span><span class="pk-num">权重</span><span></span>' +
+            '<span class="pk-num">概率</span><span class="pk-num">积分</span><span class="pk-num">实测/千tok</span></div>';
+          pool.forEach(function (r) {
+            var pct = Math.round(r.p * 100);
+            html += '<div class="pk-row">' +
+              '<span class="pk-name" title="' + esc(r.a.nickname || "") + '">' + esc(r.a.nickname || String(r.a.uid || "").slice(0, 8)) + "</span>" +
+              '<span class="pk-num">' + r.w.toFixed(1) + "</span>" +
+              '<span class="pk-bar"><i style="width:' + Math.max(2, pct) + '%"></i></span>' +
+              '<span class="pk-num">' + pct + "%</span>" +
+              '<span class="pk-num">' + (r.a.credits != null ? r.a.credits : "—") + "</span>" +
+              '<span class="pk-num">' + (r.cost == null ? "—" : r.cost.toFixed(4)) + "</span>" +
+              "</div>";
+          });
+          out.forEach(function (r) {
+            html += '<div class="pk-row dim"><span class="pk-name" title="' + esc(r.why) + '">' + esc(r.a.nickname || "") + "</span>" +
+              '<span class="pk-num">—</span><span class="pk-bar"></span><span class="pk-num">—</span>' +
+              '<span class="pk-num">' + (r.a.credits != null ? r.a.credits : "—") + "</span>" +
+              '<span class="pk-num pk-cool" title="' + esc(r.why) + '">' + esc(r.why) + "</span></div>";
+          });
+          if (dropped.length) {
+            html += '<div class="pk-note">' + esc(dropped.map(function (r) { return r.a.nickname || ""; }).join("、")) +
+              " 进了候选但被 top5 截断（网关只在前 5 名里抽签）</div>";
+          }
+          html += '<div class="pk-note">' + esc(tierText) + " · 权重 = 1 + 积分占比×10（闲置时长拿不到，按 0 算）" +
+            " · 网关在这 " + pool.length + " 个里按权重抽签，这里是期望概率</div>";
+          el.innerHTML = html;
+        }
+
         async function loadAll() {
           var statsData = null, modelsData = null;
+          var statusData = null;
           try {
             var r = await fetch(BASE + "/status", { cache: "no-store" });
-            renderPool(await r.json());
+            statusData = await r.json();
+            renderPool(statusData);
+            renderPick(statusData);
           } catch (e) {
             byId("wbc-pool").innerHTML = row("账号池", '<span class="dot err"></span>' + esc(String(e)));
           }
