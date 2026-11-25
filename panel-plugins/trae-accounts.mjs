@@ -399,39 +399,62 @@ export default {
           <h2>Trae 账号池</h2>
           <div class="phead-sub">账号优先：登录、导入、签到、倍率</div>
         </div>
-        <div class="split-2">
-          <div class="pblock pane">
-            <div class="pblock-head">账号 <span class="k">点行看详情</span>
-            <span class="grow"></span>
-            <button class="btn sm primary" type="button" id="wtr-login"><span class="btn-label">登录新账号</span></button>
-            <button class="btn sm" type="button" id="wtr-credits"><span class="btn-label">积分/签到实查</span></button>
-            <button class="btn sm" type="button" id="wtr-import-toggle"><span class="btn-label">导入凭证</span></button>
-          </div>
-          <div class="list-scroll" id="wtr-accounts"><div class="empty">加载中…</div></div>
-        </div>
-          <div class="pblock pane">
-            <div class="pblock-head">模型倍率 <span class="k">点行看参数</span></div>
+        <div class="wtr-layout">
+          <section class="wtr-section wtr-account-section">
+            <div class="wtr-section-head">
+              <div>
+                <h3>账号池</h3>
+                <div class="k">点行看详情 · 登录 / 导入 / 签到 / 倍率</div>
+              </div>
+              <div class="wtr-actions">
+                <button class="btn sm primary" type="button" id="wtr-login"><span class="btn-label">登录新账号</span></button>
+                <button class="btn sm" type="button" id="wtr-credits"><span class="btn-label">积分/签到实查</span></button>
+                <button class="btn sm" type="button" id="wtr-import-toggle"><span class="btn-label">导入凭证</span></button>
+              </div>
+            </div>
+            <div class="list-scroll" id="wtr-accounts"><div class="empty">加载中…</div></div>
+            <div id="wtr-account-tools">
+              <div id="wtr-login-box">
+                <div>打开授权链接，用 TRAE 账号登录：</div>
+                <div><a id="wtr-login-url" href="#" target="_blank" rel="noopener">(生成中…)</a></div>
+                <div id="wtr-login-state">等待发起…</div>
+                <div class="actions" style="margin-top: 8px;">
+                  <button class="btn" type="button" id="wtr-login-cancel"><span class="btn-label">取消登录</span></button>
+                </div>
+              </div>
+              <div id="wtr-import-area">
+                <textarea id="wtr-import-text" spellcheck="false" placeholder="粘贴 TRAE 登录回调链接（http://127.0.0.1:18080/authorize?...）或凭证 JSON"></textarea>
+                <div class="hint">回调链接来自登录流程；JSON 支持嵌套形与扁平形（accessToken 必填）。</div>
+                <div class="actions"><button class="btn primary" type="button" id="wtr-import-go"><span class="btn-label">导入</span></button></div>
+              </div>
+            </div>
+          </section>
+          <section class="wtr-section wtr-rate-section">
+            <div class="wtr-section-head">
+              <div>
+                <h3>模型倍率</h3>
+                <div class="k">点行看参数 · 消耗倍率来自 TRAE 模型目录</div>
+              </div>
+            </div>
             <div class="list-scroll" id="wtr-rates"><div class="empty">模型倍率加载中…</div></div>
-          </div>
-        </div>
-        <div id="wtr-login-box">
-          <div>打开授权链接，用 TRAE 账号登录：</div>
-          <div><a id="wtr-login-url" href="#" target="_blank" rel="noopener">(生成中…)</a></div>
-          <div id="wtr-login-state">等待发起…</div>
-          <div class="actions" style="margin-top: 8px;">
-            <button class="btn" type="button" id="wtr-login-cancel"><span class="btn-label">取消登录</span></button>
-          </div>
-        </div>
-        <div id="wtr-import-area">
-          <textarea id="wtr-import-text" spellcheck="false" placeholder="粘贴 TRAE 登录回调链接（http://127.0.0.1:18080/authorize?...）或凭证 JSON"></textarea>
-          <div class="hint">回调链接来自登录流程；JSON 支持嵌套形与扁平形（accessToken 必填）。</div>
-          <div class="actions"><button class="btn primary" type="button" id="wtr-import-go"><span class="btn-label">导入</span></button></div>
+          </section>
         </div>
         <pre id="wtr-out"></pre>
         <style>
           #wtr-login-box, #wtr-import-area, #wtr-out { display: none; }
           #wtr-login-box.show, #wtr-import-area.show, #wtr-out.show { display: block; }
-          /* 账号表有 6 个操作胶囊，窄栏里会溢出被裁掉：允许换行、别再压成 1% 宽 */
+          /* 全宽分区：账号池/倍率表各占整行，避免按钮列顶穿中缝 */
+          .wtr-layout { display: flex; flex-direction: column; gap: 14px; padding: 4px 0; }
+          .wtr-section { min-width: 0; border: 1px solid var(--line-2, #eee); border-radius: 12px; background: var(--card-2, rgba(127,127,127,.035)); overflow: hidden; }
+          .wtr-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px 10px; border-bottom: 1px solid var(--line-2, #eee); }
+          .wtr-section-head h3 { margin: 0; font-size: 14px; font-weight: 650; color: var(--fg, #171717); }
+          .wtr-section-head .k { margin-top: 3px; font-size: 11px; }
+          .wtr-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+          #wtr-accounts { max-height: 230px; }
+          #wtr-rates { max-height: 430px; }
+          #wtr-account-tools { border-top: 1px solid var(--line-2, #eee); background: var(--card, #fff); }
+          #wtr-login-box, #wtr-import-area { margin: 0; padding: 12px 14px; border: 0; border-radius: 0; background: transparent; }
+          #wtr-login-box.show, #wtr-import-area.show { display: block; }
           #wtr-accounts table.p-table td.acts { width: auto; white-space: nowrap; }
           .wtr-menu {
             position: fixed; z-index: 80; display: flex; flex-direction: column; gap: 4px;
