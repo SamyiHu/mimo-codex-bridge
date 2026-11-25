@@ -55,12 +55,38 @@ node qoder-bridge.mjs                      # 起边车，:7865
 # 面板「Qoder 账号」→ 登录新账号（设备授权）
 ```
 
-要在桥里用 Qoder，复制 `upstreams.example.json` 成 `upstreams.json`，加一条：
+要在桥里用 Qoder，在 `upstreams.json` 里加一条。注意注册表要求 `tokenFile` 这个**字段**非空
+（少了会报"上游 qoder 缺 tokenFile"并整份配置回退），但边车本身没有鉴权，所以写个名字就行，
+**文件不用真的存在**：
 
 ```json
-{ "id": "qoder", "kind": "openai", "base": "http://127.0.0.1:7865", "tokenFile": "",
+{ "id": "qoder", "kind": "openai", "base": "http://127.0.0.1:7865", "tokenFile": "qoder-api-key.txt",
   "capabilities": { "chatMode": "raw", "modelPassthrough": true } }
 ```
+
+`mimo start` 会把边车一起拉起来（已在运行则跳过），`mimo stop` / `mimo restart` 一并管它，
+`mimo status` 里能看到 `Qoder : 运行中（账号 N 个，模型 M 个）`。也可以单独
+`mimo qoder` / `mimo qoder-stop`。
+
+#### 模型目录是自动拉的，不需要本地装 Qoder
+
+边车启动时（以及超过 `QODER_CATALOG_TTL_MS`，默认 6 小时）会向官方目录接口
+`GET /algo/api/v2/model/list` 拉一次，落盘到 `%USERPROFILE%\.qoder2api\models.json`。
+这一步**只依赖账号 token**，跟本机有没有装 Qoder 客户端无关；拉不到时用内置目录兜底，
+不会没有模型。想强制刷新：
+
+```text
+curl http://127.0.0.1:7865/v1/catalog/refresh
+```
+
+目录接口是 **GET 且签名体必须为空**——传了 body 会返回 `403 {"code":"101","message":"Signature invalid"}`，
+POST 则直接 400，别踩这个坑。
+
+#### 未知模型 key 会静默回落到默认模型
+
+目录里没有的 key（写错名字、或者道听途说的 `glm-5.4`、`qwen4` 之类猜出来的 key）
+不会报错，而是被上游当成默认模型处理。排查模型到底有没有生效，别看返回的 `model` 字段
+（它常常就是 `auto`），用一句"你的模型名称是什么"来问，答出来的家族才是真的。
 
 ### 子 Key
 

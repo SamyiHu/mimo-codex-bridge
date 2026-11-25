@@ -20,6 +20,7 @@ import path from "node:path";
 import os from "node:os";
 import http from "node:http";
 import { openQoderStream, buildQoderChatBody, iterateQoderChunks } from "./qoder-upstream.mjs";
+import { buildCosyHeaders } from "./qoder-cosy.mjs";
 import { planRetry, parseRetryAfter } from "./retry-policy.mjs";
 import { Scheduler } from "./scheduler.mjs";
 
@@ -30,12 +31,25 @@ const KEY_FILE = path.join(HOME, ".qoder2api", "api-key.txt");
 const STATE_FILE = path.join(HOME, ".qoder2api", "scheduler-state.json");
 const MODELS_FILE = path.join(HOME, ".qoder2api", "models.json");
 
+// 目录接口（GET，签名体必须为空；POST 会被拒）。只认账号 token，不需要本地装 Qoder 客户端。
+const CATALOG_URL = "https://gateway.qoder.com.cn/algo/api/v2/model/list";
+const CATALOG_TTL_MS = Number(process.env.QODER_CATALOG_TTL_MS || 6 * 60 * 60 * 1000);
+
+// 离线兜底：拉不到目录时用它（与 2026-11 官方 chat 目录对齐；价格是倍率不是钱）
 const DEFAULT_MODELS = [
-  "Qwen3.8-Max",
-  "Qwen3.8-Plus",
-  "Qwen3.8-Flash",
-  "glm-5.3",
-  "glm-5.2",
+  { key: "auto", name: "Auto", free: false, priceFactor: 0.3, maxInput: 200000, isReasoning: true, isVl: true },
+  { key: "qmodel_latest", name: "Qwen4-Max", free: false, priceFactor: 0.4, maxInput: 1000000, isReasoning: true, isVl: true },
+  { key: "qmodel_38max", name: "Qwen3.8-Max", free: false, priceFactor: 0.2, maxInput: 180000, isReasoning: true, isVl: true },
+  { key: "qfmodel", name: "Qwen3.8-Flash", free: false, priceFactor: 0.04, maxInput: 180000, isReasoning: true, isVl: true },
+  { key: "dmodel", name: "DeepSeek-V4-Pro", free: false, priceFactor: 0.5, maxInput: 96000, isReasoning: true, isVl: true },
+  { key: "dfmodel", name: "DeepSeek-Flash", free: false, priceFactor: 0.1, maxInput: 180000, isReasoning: false, isVl: true },
+  { key: "gmodel_latest", name: "GLM-5.4", free: false, priceFactor: 0.8, maxInput: 180000, isReasoning: true, isVl: true },
+  { key: "gmodel", name: "GLM-5.3", free: false, priceFactor: 0.8, maxInput: 180000, isReasoning: true, isVl: true },
+  { key: "gfmodel", name: "GLM-5.3-Flash", free: false, priceFactor: 0.1, maxInput: 1000000, isReasoning: true, isVl: true },
+  { key: "kmodel_latest", name: "Kimi-K3.1-Pro", free: false, priceFactor: 1, maxInput: 180000, isReasoning: false, isVl: true },
+  { key: "kmodel", name: "Kimi-K2.8-Preview", free: false, priceFactor: 0.8, maxInput: 180000, isReasoning: true, isVl: true },
+  { key: "jmodel", name: "Step-5-Preview", free: false, priceFactor: 0.3, maxInput: 1000000, isReasoning: true, isVl: true },
+  { key: "mmodel", name: "MiniMax-M3.1-Flash", free: false, priceFactor: 0.1, maxInput: 180000, isReasoning: true, isVl: true },
 ];
 
 function log(...args) { console.log(new Date().toISOString(), ...args); }
@@ -80,7 +94,56 @@ function loadCatalog() {
       }));
     if (out.length) return out;
   } catch { /* 回落到默认 */ }
-  return DEFAULT_MODELS.map((name) => ({ key: name, name, source: "system", isReasoning: false, isVl: false, maxInput: 0, free: false, priceFactor: 0 }));
+  return DEFAULT_MODELS.map((m) => ({ ...m, source: "system" }));
+}
+
+/**
+ * 从官方目录接口拉一次模型目录并落盘到 ~/.qoder2api/models.json。
+ * 只依赖账号 token，不需要本地安装 Qoder 客户端。
+ * @returns {Promise<number>} 写入的模型条数（0 表示没成）
+ */
+async function refreshCatalog({ force = false, account = null } = {}) {
+  try {
+    const stat = fs.existsSync(MODELS_FILE) ? fs.statSync(MODELS_FILE) : null;
+    if (!force && stat && Date.now() - stat.mtimeMs < CATALOG_TTL_MS) return 0;
+    const acc = account || loadAccounts()[0];
+    if (!acc) return 0;
+    const headers = buildCosyHeaders(null, CATALOG_URL, {
+      userId: acc.uid,
+      authToken: acc.accessToken,
+      name: acc.nickname || "",
+      email: acc.email || "",
+      machineId: acc.machineId || "",
+    });
+    const res = await fetch(CATALOG_URL, {
+      headers: { ...headers, Accept: "application/json" },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const doc = await res.json();
+    // 目录按场景分组（chat/developer/...），取 chat 作为对话可用集合
+    const chat = Array.isArray(doc.chat) ? doc.chat : [];
+    const models = chat
+      .filter((m) => m && m.key && m.enable !== false)
+      .map((m) => ({
+        key: String(m.key),
+        display_name: String(m.display_name || m.key),
+        source: String(m.source || "system"),
+        is_reasoning: Boolean(m.is_reasoning),
+        is_vl: Boolean(m.is_vl),
+        max_input_tokens: Number(m.max_input_tokens) || 0,
+        ...(m.is_free === true ? { is_free: true } : {}),
+        price_factor: Number(m.price_factor) || 0,
+      }));
+    if (!models.length) throw new Error("目录里没有模型");
+    fs.mkdirSync(path.dirname(MODELS_FILE), { recursive: true });
+    fs.writeFileSync(MODELS_FILE, JSON.stringify({ models }, null, 2), "utf8");
+    log("[qoder-bridge] 模型目录已刷新：" + models.length + " 个 -> " + MODELS_FILE);
+    return models.length;
+  } catch (e) {
+    log("[qoder-bridge] 模型目录刷新失败（继续用现有/兜底）：" + String(e.message || e));
+    return 0;
+  }
 }
 
 /** 请求里的 model 可能是显示名，也可能是内部 key */
@@ -321,7 +384,18 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
   if (url.pathname === "/healthz") {
     const accounts = loadAccounts();
-    return sendJson(res, 200, { ok: true, accounts: accounts.length, models: loadCatalog().length });
+    const hasFile = fs.existsSync(MODELS_FILE);
+    return sendJson(res, 200, {
+      ok: true,
+      accounts: accounts.length,
+      models: loadCatalog().length,
+      catalog: hasFile ? "file" : "builtin",
+    });
+  }
+  if (url.pathname === "/v1/catalog/refresh") {
+    return refreshCatalog({ force: true })
+      .then((n) => sendJson(res, 200, { ok: n > 0, models: loadCatalog().length, refreshed: n }))
+      .catch((e) => sendJson(res, 500, { ok: false, error: String(e.message || e) }));
   }
   if (url.pathname === "/v1/models") {
     const data = loadCatalog().map((m) => ({
@@ -352,6 +426,8 @@ const server = http.createServer((req, res) => {
 const scheduler = new Scheduler({ stateFile: STATE_FILE, logger: console });
 scheduler.daily("qoder-checkin", process.env.QODER_CHECKIN_AT || "09:10", qoderCheckin).start();
 
-server.listen(PORT, "127.0.0.1", () => {
+server.listen(PORT, "127.0.0.1", async () => {
   log("[qoder-bridge] listening on http://127.0.0.1:" + PORT + "/v1，账号 " + loadAccounts().length + " 个");
+  // 启动时按 TTL 刷新目录：没有 models.json 或过期就自动拉一次，用户不用本地装客户端。
+  await refreshCatalog();
 });

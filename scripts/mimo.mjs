@@ -22,13 +22,14 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
 const argv = process.argv.slice(2);
 
-const opt = { port: 8788, panelPort: 8791, upstream: "workbuddy", chatMode: "raw", lines: 40, noBrowser: false };
+const opt = { port: 8788, panelPort: 8791, qoderPort: 7865, upstream: "workbuddy", chatMode: "raw", lines: 40, noBrowser: false };
 let command = "";
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   const next = () => argv[++i];
   if (a === "--port") opt.port = Number(next());
   else if (a === "--panel-port") opt.panelPort = Number(next());
+  else if (a === "--qoder-port") opt.qoderPort = Number(next());
   else if (a === "--upstream") opt.upstream = next();
   else if (a === "--chat-mode") opt.chatMode = next();
   else if (a === "--lines") opt.lines = Number(next());
@@ -50,6 +51,9 @@ const paths = {
   panelPid: path.join(ROOT, "panel.pid"),
   runtimeLog: path.join(ROOT, "bridge-runtime.log"),
   secret: path.join(ROOT, "bridge-secret.txt"),
+  qoderEntry: path.join(ROOT, "qoder-bridge.mjs"),
+  qoderLog: path.join(ROOT, "qoder-bridge.log"),
+  qoderPid: path.join(ROOT, "qoder.pid"),
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -65,6 +69,16 @@ async function alive(url, timeoutMs = 2500) {
 const bridgeUp = () => alive("http://127.0.0.1:" + opt.port + "/health");
 const panelUp = () => alive("http://127.0.0.1:" + opt.panelPort + "/");
 const gatewayUp = () => alive("http://127.0.0.1:7863/healthz");
+const qoderUp = () => alive("http://127.0.0.1:" + opt.qoderPort + "/healthz");
+
+/** 边车的 /healthz 详情（账号数 / 模型数）；连不上返回 null */
+async function qoderInfo() {
+  try {
+    const res = await fetch("http://127.0.0.1:" + opt.qoderPort + "/healthz", { signal: AbortSignal.timeout(2500) });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch { return null; }
+}
 
 function runPowerShell(script, args) {
   const r = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, ...args], {
@@ -119,18 +133,66 @@ function stopBridge() {
   runPowerShell(paths.stopScript, ["-Port", String(opt.port)]);
 }
 
+// ── Qoder 边车（qoder-bridge.mjs，默认 :7865）──────────────────────────────
+// 没有它，upstreams.json 里的 qoder 上游就是个连不上的地址，面板里一条 qoder 模型都没有。
+async function startQoder() {
+  if (await qoderUp()) {
+    console.log("Qoder 边车已在运行：http://127.0.0.1:" + opt.qoderPort);
+    return;
+  }
+  if (!fs.existsSync(paths.qoderEntry)) {
+    console.log("[warn] 找不到 qoder-bridge.mjs，跳过 Qoder 边车。");
+    return;
+  }
+  const out = fs.openSync(paths.qoderLog, "a");
+  const child = spawn(process.execPath, [paths.qoderEntry], {
+    cwd: ROOT, detached: true, windowsHide: true, stdio: ["ignore", out, out],
+    env: { ...process.env, QODER_BRIDGE_PORT: String(opt.qoderPort) },
+  });
+  child.unref();
+  fs.writeFileSync(paths.qoderPid, String(child.pid), "ascii");
+  for (let i = 0; i < 30; i++) { await sleep(200); if (await qoderUp()) break; }
+  const info = await qoderInfo();
+  if (info) {
+    console.log("Qoder 边车已启动：http://127.0.0.1:" + opt.qoderPort + "（PID " + child.pid + "，账号 " + info.accounts + " 个，模型 " + info.models + " 个）");
+  } else {
+    console.log("[warn] Qoder 边车没起来，看 " + paths.qoderLog);
+  }
+}
+
+async function stopQoder() {
+  // pid 文件可能过期，但端口还活着（比如手动 node 起的），所以两个线索都用。
+  let pid = 0;
+  try { pid = Number.parseInt(fs.readFileSync(paths.qoderPid, "utf8").trim(), 10) || 0; } catch {}
+  if (!pid || !pidAlive(pid)) {
+    try { fs.unlinkSync(paths.qoderPid); } catch {}
+    if (!(await qoderUp())) { console.log("Qoder 边车未在运行。"); return; }
+    console.log("[warn] Qoder 边车在 :" + opt.qoderPort + " 上有响应，但不是本入口起的（没有 qoder.pid），不替你杀，请手动关闭。");
+    return;
+  }
+  try { process.kill(pid); console.log("已停止 Qoder 边车 PID：" + pid); } catch (e) { console.log("[warn] 停止 Qoder 边车失败：" + e.message); }
+  try { fs.unlinkSync(paths.qoderPid); } catch {}
+}
+
 function openPanel() {
   if (opt.noBrowser) return;
   spawn("cmd.exe", ["/c", "start", "", "http://127.0.0.1:" + opt.panelPort], { detached: true, stdio: "ignore", windowsHide: true }).unref();
 }
 
 async function showStatus() {
-  const [b, p, g] = await Promise.all([bridgeUp(), panelUp(), gatewayUp()]);
+  const [b, p, g, q] = await Promise.all([bridgeUp(), panelUp(), gatewayUp(), qoderUp()]);
   console.log("");
   console.log("MiMo 桥状态");
   console.log("  bridge : " + (b ? "运行中  http://127.0.0.1:" + opt.port + "/v1" : "未运行"));
   console.log("  面板   : " + (p ? "运行中  http://127.0.0.1:" + opt.panelPort : "未运行"));
   console.log("  网关   : " + (g ? "运行中  http://127.0.0.1:7863" : "未运行（workbuddy2api）"));
+  if (q) {
+    const info = await qoderInfo();
+    console.log("  Qoder  : 运行中  http://127.0.0.1:" + opt.qoderPort +
+      (info ? "（账号 " + info.accounts + " 个，模型 " + info.models + " 个）" : ""));
+  } else {
+    console.log("  Qoder  : 未运行（qoder-bridge.mjs）");
+  }
   if (b) {
     try {
       let secret = "";
@@ -157,6 +219,7 @@ function showLogs() {
 
 async function startAll() {
   await startBridge();
+  await startQoder();
   await startPanel();
   await showStatus();
   openPanel();
@@ -195,8 +258,8 @@ async function menu() {
       const k = (await ask("选择 ")).trim();
       if (k === "0" || k === "") return;
       if (k === "1") await startAll();
-      else if (k === "2") { await stopPanel(); stopBridge(); await sleep(500); await startAll(); }
-      else if (k === "3") { await stopPanel(); stopBridge(); await showStatus(); }
+      else if (k === "2") { await stopPanel(); stopBridge(); await stopQoder(); await sleep(500); await startAll(); }
+      else if (k === "3") { await stopPanel(); stopBridge(); await stopQoder(); await showStatus(); }
       else if (k === "4") await showStatus();
       else if (k === "5") showLogs();
       else if (k === "6") runPowerShell(paths.doctor, ["--port", String(opt.port), "--upstream-kind", opt.upstream]);
@@ -209,8 +272,10 @@ switch (command) {
   case "menu": await menu(); break;
   case "start": await startAll(); break;
   case "panel": await startPanel(); openPanel(); break;
-  case "stop": await stopPanel(); stopBridge(); await showStatus(); break;
-  case "restart": await stopPanel(); stopBridge(); await sleep(500); await startAll(); break;
+  case "stop": await stopPanel(); stopBridge(); await stopQoder(); await showStatus(); break;
+  case "restart": await stopPanel(); stopBridge(); await stopQoder(); await sleep(500); await startAll(); break;
+  case "qoder": await startQoder(); await showStatus(); break;
+  case "qoder-stop": await stopQoder(); await showStatus(); break;
   case "status": await showStatus(); break;
   case "logs": showLogs(); break;
   case "doctor": runPowerShell(paths.doctor, ["--port", String(opt.port), "--upstream-kind", opt.upstream]); break;
