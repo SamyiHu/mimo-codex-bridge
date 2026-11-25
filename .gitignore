@@ -38,6 +38,7 @@ panel-history.json
 panel.pid
 *.log
 bridge.pid
+qoder.pid
 panel-console*.log
 .local/
 .e2e/
