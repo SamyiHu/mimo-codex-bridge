@@ -185,6 +185,49 @@ if (!fs.existsSync(registryPath)) {
   }
 }
 
+// ── Qoder 边车（可选）：注册表里配了 qoder 才检查 ──
+async function checkQoderSidecar() {
+  let base = "";
+  try {
+    const raw = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+    const entry = (raw.upstreams || []).find((u) => u && u.id === "qoder");
+    if (entry && entry.base) base = String(entry.base);
+  } catch { /* 注册表读不到就不查 */ }
+  if (!base) {
+    check("qoder_sidecar", true, "未配置 qoder 上游（可选）", false);
+    return;
+  }
+  try {
+    const health = await fetch(base.replace(/\/+$/, "") + "/healthz", {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!health.ok) {
+      check("qoder_sidecar", false, base + " 有响应但 /healthz 是 HTTP " + health.status, false);
+      return;
+    }
+    const info = await health.json();
+    const accounts = Number(info.accounts) || 0;
+    const models = Number(info.models) || 0;
+    const problems = [];
+    if (!accounts) problems.push("没有已登录账号（面板「Qoder 账号」里授权）");
+    if (!models) problems.push("模型目录是空的（GET /v1/catalog/refresh 刷一次）");
+    check(
+      "qoder_sidecar",
+      problems.length === 0,
+      problems.length ? problems.join("；") : base + " 账号 " + accounts + " 个 / 模型 " + models + " 个（目录来源 " + (info.catalog || "?") + "）",
+      false,
+    );
+  } catch (error) {
+    check(
+      "qoder_sidecar",
+      false,
+      "连不上 " + base + "（" + error.message + "）；用 mimo qoder 启动边车",
+      false,
+    );
+  }
+}
+await checkQoderSidecar();
+
 const quotaPath = path.join(projectDir, "quota.json");
 check(
   "quota_ledger",

@@ -57,7 +57,8 @@ node qoder-bridge.mjs                      # 起边车，:7865
 
 要在桥里用 Qoder，在 `upstreams.json` 里加一条。注意注册表要求 `tokenFile` 这个**字段**非空
 （少了会报"上游 qoder 缺 tokenFile"并整份配置回退），但边车本身没有鉴权，所以写个名字就行，
-**文件不用真的存在**：
+**文件不用真的存在**——`mimo qoder` 启动时会自动补一个空的占位文件，免得 `doctor`
+报"缺 token 文件：qoder"。
 
 ```json
 { "id": "qoder", "kind": "openai", "base": "http://127.0.0.1:7865", "tokenFile": "qoder-api-key.txt",
@@ -66,7 +67,7 @@ node qoder-bridge.mjs                      # 起边车，:7865
 
 `mimo start` 会把边车一起拉起来（已在运行则跳过），`mimo stop` / `mimo restart` 一并管它，
 `mimo status` 里能看到 `Qoder : 运行中（账号 N 个，模型 M 个）`。也可以单独
-`mimo qoder` / `mimo qoder-stop`。
+`mimo qoder` / `mimo qoder-stop`。`node doctor.mjs` 会检查边车是否连得上、账号和目录是否为空。
 
 #### 模型目录是自动拉的，不需要本地装 Qoder
 

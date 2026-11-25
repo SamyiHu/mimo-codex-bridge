@@ -52,6 +52,7 @@ const paths = {
   runtimeLog: path.join(ROOT, "bridge-runtime.log"),
   secret: path.join(ROOT, "bridge-secret.txt"),
   qoderEntry: path.join(ROOT, "qoder-bridge.mjs"),
+  qoderToken: path.join(ROOT, "qoder-api-key.txt"),
   qoderLog: path.join(ROOT, "qoder-bridge.log"),
   qoderPid: path.join(ROOT, "qoder.pid"),
 };
@@ -143,6 +144,11 @@ async function startQoder() {
   if (!fs.existsSync(paths.qoderEntry)) {
     console.log("[warn] 找不到 qoder-bridge.mjs，跳过 Qoder 边车。");
     return;
+  }
+  // upstreams.json 的注册表要求 tokenFile 字段非空，但边车本身不验鉴权。
+  // 这里补个空的占位文件，免得 doctor 报"缺 token 文件：qoder"。
+  if (!fs.existsSync(paths.qoderToken)) {
+    try { fs.writeFileSync(paths.qoderToken, "", "utf8"); } catch {}
   }
   const out = fs.openSync(paths.qoderLog, "a");
   const child = spawn(process.execPath, [paths.qoderEntry], {

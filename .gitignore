@@ -39,6 +39,7 @@ panel.pid
 *.log
 bridge.pid
 qoder.pid
+qoder-api-key.txt
 panel-console*.log
 .local/
 .e2e/

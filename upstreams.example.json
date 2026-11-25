@@ -35,6 +35,16 @@
         "modelPassthrough": true,
         "enrichModels": "trae"
       }
+    },
+    {
+      "id": "qoder",
+      "kind": "openai",
+      "base": "http://127.0.0.1:7865",
+      "tokenFile": "qoder-api-key.txt",
+      "capabilities": {
+        "chatMode": "raw",
+        "modelPassthrough": true
+      }
     }
   ],
   "groups": [
