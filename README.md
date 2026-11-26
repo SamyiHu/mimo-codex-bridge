@@ -69,6 +69,11 @@ node qoder-bridge.mjs                      # 起边车，:7865
 `mimo status` 里能看到 `Qoder : 运行中（账号 N 个，模型 M 个）`。也可以单独
 `mimo qoder` / `mimo qoder-stop`。`node doctor.mjs` 会检查边车是否连得上、账号和目录是否为空。
 
+面板里 Qoder 有自己的一页（和 WorkBuddy / Trae 一样）：账号池 + **模型目录**。
+模型表按倍率倒序列出 13 个模型，显示倍率与上下文窗口，点一行展开上游 key、推理/视觉能力、
+以及它在桥里的调用名（`qoder/<模型名>`）。右上「刷新目录」会直接让边车重拉官方目录，
+不用等 6 小时 TTL。
+
 #### 模型目录是自动拉的，不需要本地装 Qoder
 
 边车启动时（以及超过 `QODER_CATALOG_TTL_MS`，默认 6 小时）会向官方目录接口

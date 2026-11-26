@@ -242,7 +242,7 @@
 
   /* ── 概览 ───────────────────────────────────────────────── */
   function upsCount(s) {
-    const n = [s.workbuddy, s.trae].filter((x) => x && x.online).length + (s.bridge && s.bridge.upstreamKind === "mimo" && s.bridge.online ? 1 : 0);
+    const n = [s.workbuddy, s.trae, s.qoder].filter((x) => x && x.online).length + (s.bridge && s.bridge.upstreamKind === "mimo" && s.bridge.online ? 1 : 0);
     return Math.max(1, n);
   }
 
@@ -255,8 +255,8 @@
     const recent = (metrics.requests && metrics.requests.recent) || [];
     const latency = (metrics.latency && metrics.latency.request) || {};
 
-    const NAMES = { mimo: "MiMo Desktop", wb: "WorkBuddy", trae: "Trae（SOLO）" };
-    const ICONS = { mimo: "cube", wb: "plug", trae: "bolt" };
+    const NAMES = { mimo: "MiMo Desktop", wb: "WorkBuddy", trae: "Trae（SOLO）", qoder: "Qoder" };
+    const ICONS = { mimo: "cube", wb: "plug", trae: "bolt", qoder: "code" };
     const ups = r.enabled
       ? (r.upstreams || []).map((u) => ({
           id: u.id,
@@ -779,6 +779,7 @@
         { id: "mimo", kind: "mimo", base: "", tokenFile: "token.txt", capabilities: { needsDiscovery: true, modelPrefix: "mimo-desktop", reasoningEffort: "normalize", thinkingBudget: "map", fallbackModel: "mimo-desktop/mimo-v2.6-pro" } },
         { id: "wb", kind: "openai", base: "http://127.0.0.1:7863", tokenFile: "workbuddy-api-key.txt", capabilities: { chatMode: "raw", modelPassthrough: true } },
         { id: "trae", kind: "openai", base: "http://127.0.0.1:7864", tokenFile: "trae-api-key.txt", capabilities: { chatMode: "raw", modelPassthrough: true, enrichModels: "trae" } },
+        { id: "qoder", kind: "openai", base: "http://127.0.0.1:7865", tokenFile: "qoder-api-key.txt", capabilities: { chatMode: "raw", modelPassthrough: true } },
       ],
       groups: [{ id: "daily", models: [], routing: "smart", stays: "auto", listed: true }],
       aliases: {},
@@ -1974,23 +1975,27 @@
   function pluginSideCard(plugin) {
     const s = state.status || {};
     const title = String((plugin && plugin.title) || "");
-    const isTrae = title.indexOf("Trae") >= 0;
-    const upId = isTrae ? "trae" : "wb";
+    // 插件标题里带哪家就认哪家；认不出来按 WorkBuddy 处理（历史行为）
+    const upId = title.indexOf("Trae") >= 0 ? "trae" : title.indexOf("Qoder") >= 0 ? "qoder" : "wb";
     const up = ((s.routing || {}).upstreams || []).find((u) => u.id === upId);
     const live = ((s.liveQuota || {})[upId]) || null;
     const models = (s.models || []).filter((m) => String(m).startsWith(upId + "/")).length;
     const recent = ((s.metrics || {}).requests || {}).recent || [];
     const mine = recent.filter((x) => x.upstream === upId);
-    const gateway = isTrae ? s.trae : s.workbuddy;
+    const gateway = upId === "trae" ? s.trae : upId === "qoder" ? s.qoder : s.workbuddy;
     const kv = (k, v, cls) => '<div class="row"><div class="k">' + k + '</div><div class="v ' + (cls || "") + '">' + v + "</div></div>";
+    // Qoder 边车不结算积分，余额/账号走它自己的 healthz
+    const accountLine = upId === "qoder"
+      ? (gateway && gateway.online ? (gateway.accounts || 0) + " 个已登录" : "—")
+      : live ? live.healthy + " / " + live.accounts + " 可用" : "—";
     return card(
       "后端状态",
       up ? esc(up.base || "自动发现") : "",
       kv("网关", (gateway && gateway.online ? '<span class="pill ok">在线</span>' : '<span class="pill err">离线</span>')) +
         kv("模型", models + " 个") +
         kv("近期请求", fmtNum(mine.length) + " 次") +
-        kv("余额", live ? fmtNum(live.credits) + " 积分" : "—") +
-        kv("账号", live ? live.healthy + " / " + live.accounts + " 可用" : "—"),
+        (upId === "qoder" ? "" : kv("余额", live ? fmtNum(live.credits) + " 积分" : "—")) +
+        kv("账号", accountLine),
     );
   }
 

@@ -48,6 +48,7 @@ function loadSettings() {
       saved.gatewayDir ||
       path.join(os.homedir(), ".workbuddy2api"),
     traeUrl: process.env.TRAE_URL || saved.traeUrl || "http://127.0.0.1:7864",
+    qoderUrl: process.env.QODER_URL || saved.qoderUrl || "http://127.0.0.1:7865",
     traeDir:
       process.env.TRAE2API_DIR ||
       saved.traeDir ||
@@ -80,12 +81,14 @@ function saveSettings(patch) {
     workbuddyUrl: String(patch.workbuddyUrl ?? current.workbuddyUrl).replace(/\/+$/, ""),
     gatewayDir: String(patch.gatewayDir ?? current.gatewayDir),
     traeUrl: String(patch.traeUrl ?? current.traeUrl).replace(/\/+$/, ""),
+    qoderUrl: String(patch.qoderUrl ?? current.qoderUrl).replace(/\/+$/, ""),
     traeDir: String(patch.traeDir ?? current.traeDir),
   };
   fs.writeFileSync(settingsFile, JSON.stringify(next, null, 2), "utf8");
   WORKBUDDY_URL = next.workbuddyUrl;
   GATEWAY_DIR = next.gatewayDir;
   TRAE_URL = next.traeUrl;
+  QODER_URL = next.qoderUrl;
   TRAE_DIR = next.traeDir;
   TRAE_EXE = path.join(TRAE_DIR, "trae2api.exe");
   GATEWAY_EXE = path.join(GATEWAY_DIR, "wb2api.exe");
@@ -94,7 +97,7 @@ function saveSettings(patch) {
   return next;
 }
 
-let { workbuddyUrl: WORKBUDDY_URL, gatewayDir: GATEWAY_DIR, traeUrl: TRAE_URL, traeDir: TRAE_DIR } =
+let { workbuddyUrl: WORKBUDDY_URL, gatewayDir: GATEWAY_DIR, traeUrl: TRAE_URL, qoderUrl: QODER_URL, traeDir: TRAE_DIR } =
   loadSettings();
 let GATEWAY_EXE = path.join(GATEWAY_DIR, "wb2api.exe");
 let GATEWAY_CONFIG = path.join(GATEWAY_DIR, "config.json");
@@ -580,9 +583,11 @@ async function collectStatus() {
     bridgePort: BRIDGE_PORT,
     workbuddyUrl: WORKBUDDY_URL,
     traeUrl: TRAE_URL,
+    qoderUrl: QODER_URL,
     bridge: { online: false },
     workbuddy: { online: false },
     trae: { online: false },
+    qoder: { online: false },
     keys: {
       bridgeSecret: Boolean(bridgeSecret),
       workbuddyKey: Boolean(workbuddyKey),
@@ -737,6 +742,31 @@ async function collectStatus() {
     result.trae.detail = "未运行或不可达（需先启动 trae2api）";
     result.trae.gateDir = TRAE_DIR;
     result.trae.gateExe = fs.existsSync(TRAE_EXE);
+  }
+
+  // Qoder 边车（qoder-bridge.mjs）。它自带鉴权（可选），本机一般不设 key。
+  try {
+    const healthz = await fetchJson(`${QODER_URL}/healthz`, {}, 2000);
+    result.qoder.online = Boolean(healthz.ok);
+    const info = healthz.payload || {};
+    result.qoder.accounts = Number(info.accounts) || 0;
+    result.qoder.modelCount = Number(info.models) || 0;
+    result.qoder.catalog = String(info.catalog || "");
+    result.qoder.detail = "账号 " + result.qoder.accounts + " 个 / 模型 " + result.qoder.modelCount + " 个";
+    try {
+      const models = await fetchJson(`${QODER_URL}/v1/models`, {}, 3000);
+      if (models.ok && Array.isArray(models.payload?.data)) {
+        result.qoder.modelCount = models.payload.data.length;
+        result.qoder.sample = models.payload.data
+          .slice(0, 6)
+          .map((m) => m.id)
+          .filter(Boolean);
+      }
+    } catch {
+      /* optional */
+    }
+  } catch {
+    result.qoder.detail = "未运行或不可达（需先启动 qoder-bridge.mjs，或用 mimo qoder）";
   }
 
   try {
@@ -933,6 +963,7 @@ async function loadPlugins() {
           gatewayExe: GATEWAY_EXE,
           gatewayConfig: GATEWAY_CONFIG,
           traeUrl: TRAE_URL,
+          qoderUrl: QODER_URL,
           traeDir: TRAE_DIR,
           traeExe: TRAE_EXE,
           bridgePort: BRIDGE_PORT,

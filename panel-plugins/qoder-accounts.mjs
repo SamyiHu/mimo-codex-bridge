@@ -60,8 +60,33 @@ function mask(token) {
 export default {
   id: "qoder-accounts",
   title: "Qoder 账号",
-  init({ registerRoute, registerCard, json }) {
+  init({ registerRoute, registerCard, json, settings, fetchJson }) {
     const flows = new Map(); // nonce -> { verifier, machineId, at }
+    const sidecar = () => String((settings && settings().qoderUrl) || "http://127.0.0.1:7865").replace(/\/+$/, "");
+
+    /** 边车 /v1/models 的条目 → 面板要的扁平结构 */
+    function toRow(m) {
+      return {
+        id: String(m && m.id || ""),
+        key: String(m && m.qoder_key || ""),
+        context: Number(m && m.context_length) || 0,
+        price: Number(m && m.price_factor) || 0,
+        free: Boolean(m && m.is_free),
+        vl: Boolean(m && m.supports_images),
+        reasoning: Boolean(m && m.supports_reasoning),
+      };
+    }
+
+    async function loadModels() {
+      try {
+        const r = await fetchJson(sidecar() + "/v1/models", {}, 4000);
+        if (!r.ok) return { ok: false, error: "边车 /v1/models HTTP " + r.status };
+        const data = Array.isArray(r.payload && r.payload.data) ? r.payload.data : [];
+        return { ok: true, models: data.map(toRow).filter((m) => m.id) };
+      } catch (e) {
+        return { ok: false, error: "连不上边车 " + sidecar() + "（" + (e && e.message ? e.message : e) + "）" };
+      }
+    }
 
     function buildFlow() {
       const verifier = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
@@ -165,6 +190,27 @@ export default {
       return json(res, 200, { ok: true, accounts, dir: authDir() });
     });
 
+    // 模型目录：直接问边车，面板只做展示（倍率/上下文/能力都是目录里的原值）
+    registerRoute("GET", "/models", async (req, res, { json }) => {
+      const r = await loadModels();
+      return json(res, 200, r);
+    });
+
+    // 让边车立刻重拉官方目录（默认 6 小时才自动刷一次）
+    registerRoute("POST", "/models/refresh", async (req, res, { json }) => {
+      try {
+        const r = await fetchJson(sidecar() + "/v1/catalog/refresh", { method: "POST" }, 20000);
+        const models = await loadModels();
+        return json(res, 200, {
+          ok: Boolean(r.ok && r.payload && r.payload.ok !== false),
+          refreshed: r.payload && r.payload.refreshed,
+          models,
+        });
+      } catch (e) {
+        return json(res, 200, { ok: false, error: "刷新失败：" + (e && e.message ? e.message : e) });
+      }
+    });
+
     registerRoute("POST", "/accounts/toggle", async (req, res, { json, readBody }) => {
       const body = await readBody(req);
       const uid = String(body.uid || "").trim();
@@ -237,7 +283,7 @@ export default {
       <section class="card">
         <div class="phead">
           <h2>Qoder 账号</h2>
-          <div class="phead-sub">设备授权登录 · 账号池 · 每日签到（参考 TraeWorkAssistant 设备流）</div>
+          <div class="phead-sub">设备授权登录 · 账号池 · 模型目录 · 每日签到（参考 TraeWorkAssistant 设备流）</div>
         </div>
         <div class="pblock">
           <div class="pblock-head">账号
@@ -255,11 +301,29 @@ export default {
           <div class="list-scroll" id="qdc-pool"><div class="empty">加载中…</div></div>
           <div class="hint" id="qdc-out"></div>
         </div>
+        <div class="pblock">
+          <div class="pblock-head">模型
+            <span class="k" id="qdc-model-count"></span>
+            <span class="grow"></span>
+            <button class="btn sm quiet" type="button" id="qdc-models-refresh"><span class="btn-label">刷新目录</span></button>
+          </div>
+          <div class="list-scroll" id="qdc-models"><div class="empty">模型加载中…</div></div>
+        </div>
         <style>
-          #qdc-pool table.p-table { width: 100%; }
-          #qdc-pool table.p-table th { text-align: left; font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line-2); }
-          #qdc-pool table.p-table td { padding: 7px 8px; border-bottom: 1px solid var(--line-3); font-size: 12.5px; }
+          #qdc-pool table.p-table, #qdc-models table.p-table { width: 100%; }
+          #qdc-pool table.p-table th, #qdc-models table.p-table th { text-align: left; font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line-2); }
+          #qdc-pool table.p-table td, #qdc-models table.p-table td { padding: 7px 8px; border-bottom: 1px solid var(--line-3); font-size: 12.5px; }
           #qdc-pool table.p-table td.acts { width: auto; white-space: nowrap; text-align: right; }
+          #qdc-models table.p-table th.num, #qdc-models table.p-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+          #qdc-models tr.qdc-model-row { cursor: pointer; }
+          #qdc-models tr.qdc-model-row:hover td { background: var(--pill-hover); }
+          #qdc-models tr.qdc-model-row.open td { background: var(--pill-hover); }
+          #qdc-models tr.qdc-model-detail > td { padding: 0 8px 10px; }
+          #qdc-models .qdc-param-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 14px; padding: 6px 0 2px; }
+          #qdc-models .qdc-param { display: flex; gap: 8px; font-size: 11.5px; }
+          #qdc-models .qdc-param .pk { color: var(--muted); min-width: 52px; }
+          #qdc-models .qdc-param .pv { color: var(--fg-2); }
+          #qdc-models .qdc-param .pv.dim { color: var(--faint); }
           .qdc-act { display: inline-flex; align-items: center; height: 20px; padding: 0 10px; margin-left: 4px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--fg-2); font-size: 11px; line-height: 1; white-space: nowrap; cursor: pointer; }
           .qdc-act:hover { background: var(--pill-hover); border-color: var(--accent-line); color: var(--fg); }
           .qdc-act.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 32%, transparent); background: var(--err-soft); }
@@ -325,6 +389,72 @@ export default {
           if (d.error) { st.textContent = d.error; if (d.expired) { clearInterval(timer); timer = null; } return; }
           st.textContent = "等待登录完成… " + (d.detail || "");
         }
+        // ── 模型目录：倍率 / 上下文 / 能力，点行展开 ──────────────────
+        function fmtCtx(n) {
+          n = Number(n) || 0;
+          if (!n) return "—";
+          if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 ? 1 : 0) + "M";
+          if (n >= 1000) return Math.round(n / 1000) + "K";
+          return String(n);
+        }
+        function param(k, v, dim) {
+          var empty = (v == null || v === "");
+          return '<div class="qdc-param"><span class="pk">' + esc(k) + '</span><span class="pv' + (empty || dim ? " dim" : "") + '">' +
+            esc(empty ? "—" : String(v)) + "</span></div>";
+        }
+        function renderModels(d) {
+          var el = byId("qdc-models");
+          var cnt = byId("qdc-model-count");
+          if (!el) return;
+          if (!d || !d.ok) {
+            if (cnt) cnt.textContent = "";
+            el.innerHTML = '<div class="empty">' + esc((d && d.error) || "模型目录不可达") + '</div>';
+            return;
+          }
+          var list = d.models || [];
+          if (cnt) cnt.textContent = list.length + " 个" + (list.filter(function (m) { return m.free; }).length ? " · " + list.filter(function (m) { return m.free; }).length + " 个免费" : "");
+          if (!list.length) { el.innerHTML = '<div class="empty">目录是空的 · 点「刷新目录」</div>'; return; }
+          var sorted = list.slice().sort(function (a, b) { return (b.price || 0) - (a.price || 0); });
+          var html = '<table class="p-table"><thead><tr><th>模型</th><th class="num">倍率</th><th class="num">上下文</th></tr></thead><tbody>';
+          sorted.forEach(function (m, i) {
+            var tags = (m.reasoning ? ' <span class="k">推理</span>' : "") + (m.vl ? ' <span class="k">视觉</span>' : "") + (m.free ? ' <span class="k">免费</span>' : "");
+            html += '<tr class="qdc-model-row" data-i="' + i + '"><td>' + esc(m.id) + tags + '</td>' +
+              '<td class="num">' + (m.price ? esc(String(m.price)) + "x" : "—") + '</td>' +
+              '<td class="num">' + fmtCtx(m.context) + '</td></tr>';
+            html += '<tr class="qdc-model-detail" data-for="' + i + '" hidden><td colspan="3"><div class="qdc-param-grid">' +
+              param("上游 key", m.key) +
+              param("上下文", m.context ? fmtCtx(m.context) + "（" + m.context + " tokens）" : "") +
+              param("倍率", m.price ? m.price + "x" : "") +
+              param("推理", m.reasoning ? "支持" : "不支持") +
+              param("视觉", m.vl ? "支持" : "不支持") +
+              param("免费", m.free ? "是" : "否") +
+              param("调用名", "qoder/" + m.id) +
+              "</div></td></tr>";
+          });
+          html += "</tbody></table>";
+          el.innerHTML = html;
+          Array.prototype.forEach.call(el.querySelectorAll(".qdc-model-row"), function (tr) {
+            tr.addEventListener("click", function () {
+              var d2 = el.querySelector('.qdc-model-detail[data-for="' + tr.getAttribute("data-i") + '"]');
+              if (d2) d2.hidden = !d2.hidden;
+              tr.classList.toggle("open");
+            });
+          });
+        }
+        async function loadModels() {
+          var el = byId("qdc-models");
+          if (el) el.innerHTML = '<div class="empty">模型加载中…</div>';
+          renderModels(await api("/models"));
+        }
+        byId("qdc-models-refresh").onclick = async function () {
+          var el = byId("qdc-models");
+          if (el) el.innerHTML = '<div class="empty">正在向官方拉目录…</div>';
+          var d = await api("/models/refresh", {});
+          if (d && d.ok === false && d.error) { if (el) el.innerHTML = '<div class="empty">' + esc(d.error) + '</div>'; return; }
+          renderModels(d && d.models ? d.models : await api("/models"));
+          load();
+        };
+
         byId("qdc-login").onclick = async function () {
           var box = byId("qdc-login-box"); box.style.display = "block";
           byId("qdc-login-state").textContent = "正在生成授权链接…";
@@ -344,6 +474,7 @@ export default {
         };
         byId("qdc-refresh").onclick = load;
         load();
+        loadModels();
       })();
       </script>
     `);
