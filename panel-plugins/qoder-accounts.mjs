@@ -197,6 +197,70 @@ export default {
     });
 
     // 让边车立刻重拉官方目录（默认 6 小时才自动刷一次）
+    // 积分 / 消耗：官方 /sash/api/v2/me/usage（额度）+ credits-summary（累计/峰值）+ credits-heatmap（逐日）
+    async function readJson(rec, p) {
+      try {
+        const r = await qoderFetch(rec, p);
+        if (!r.ok) return { ok: false, status: r.status };
+        return { ok: true, body: await r.json().catch(() => null) };
+      } catch (e) {
+        return { ok: false, error: String((e && e.message) || e) };
+      }
+    }
+
+    async function collectUsage() {
+      const accounts = loadAccounts().filter((a) => !a.account.disabled);
+      if (!accounts.length) return { ok: false, error: "没有可用账号（先登录）" };
+      const out = [];
+      for (const rec of accounts.slice(0, 5)) {
+        const uid = rec.account.uid;
+        const usage = await readJson(rec, "/sash/api/v2/me/usage");
+        if (!usage.ok) {
+          out.push({ uid, nickname: rec.account.nickname || "", ok: false, error: "额度读取失败（HTTP " + (usage.status || "?") + "）" });
+          continue;
+        }
+        const u = usage.body && usage.body.qoderUsage ? usage.body.qoderUsage : {};
+        const q = u.userQuota || {};
+        const addOn = u.addOnQuota || {};
+        const summary = await readJson(rec, "/sash/api/v1/ai-conversations/credits-summary");
+        const heat = await readJson(rec, "/sash/api/v1/ai-conversations/credits-heatmap");
+        const items = heat.ok && heat.body && Array.isArray(heat.body.items) ? heat.body.items : [];
+        out.push({
+          uid,
+          nickname: rec.account.nickname || "",
+          ok: true,
+          userType: String(u.userType || ""),
+          usageType: String(u.usageType || ""),
+          exceeded: Boolean(u.isQuotaExceeded),
+          expiresAt: u.expiresAt || null,
+          refreshAt: u.refreshAt || null,
+          quota: {
+            total: Number(q.total) || 0,
+            used: Number(q.used) || 0,
+            remaining: Number(q.remaining) || 0,
+            percentage: Number(q.percentage) || 0,
+            unit: String(q.unit || "credits"),
+          },
+          addOn: addOn.total
+            ? { total: Number(addOn.total) || 0, used: Number(addOn.used) || 0, remaining: Number(addOn.remaining) || 0 }
+            : null,
+          spend: summary.ok && summary.body
+            ? {
+                total: Number(summary.body.totalCredits) || 0,
+                peak: Number(summary.body.peakCredits) || 0,
+                peakDate: String(summary.body.peakDate || ""),
+              }
+            : null,
+          daily: items.map((it) => ({ date: String(it.date || ""), value: Number(it.value) || 0 })),
+        });
+      }
+      return { ok: true, accounts: out, at: new Date().toISOString() };
+    }
+
+    registerRoute("GET", "/usage", async (req, res, { json }) => {
+      return json(res, 200, await collectUsage());
+    });
+
     registerRoute("POST", "/models/refresh", async (req, res, { json }) => {
       try {
         const r = await fetchJson(sidecar() + "/v1/catalog/refresh", { method: "POST" }, 20000);
@@ -302,6 +366,14 @@ export default {
           <div class="hint" id="qdc-out"></div>
         </div>
         <div class="pblock">
+          <div class="pblock-head">积分与消耗
+            <span class="k" id="qdc-usage-at"></span>
+            <span class="grow"></span>
+            <button class="btn sm quiet" type="button" id="qdc-usage-refresh"><span class="btn-label">刷新</span></button>
+          </div>
+          <div id="qdc-usage"><div class="empty">加载中…</div></div>
+        </div>
+        <div class="pblock">
           <div class="pblock-head">模型
             <span class="k" id="qdc-model-count"></span>
             <span class="grow"></span>
@@ -324,6 +396,24 @@ export default {
           #qdc-models .qdc-param .pk { color: var(--muted); min-width: 52px; }
           #qdc-models .qdc-param .pv { color: var(--fg-2); }
           #qdc-models .qdc-param .pv.dim { color: var(--faint); }
+          #qdc-usage .qdc-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 12px; }
+          #qdc-usage .qdc-kpi { border: 1px solid var(--line-3); border-radius: 10px; padding: 9px 12px; background: var(--card); }
+          #qdc-usage .qdc-kpi .n { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--fg); }
+          #qdc-usage .qdc-kpi .n small { font-size: 11px; font-weight: 400; color: var(--muted); margin-left: 3px; }
+          #qdc-usage .qdc-kpi .l { font-size: 11px; color: var(--muted); margin-top: 2px; }
+          #qdc-usage .qdc-bar { height: 7px; border-radius: 999px; background: var(--line-3); overflow: hidden; margin: 2px 0 10px; }
+          #qdc-usage .qdc-bar > i { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
+          #qdc-usage .qdc-bar.warn > i { background: var(--warn); }
+          #qdc-usage .qdc-bar.err > i { background: var(--err); }
+          #qdc-usage .qdc-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 11.5px; color: var(--muted); margin-bottom: 10px; }
+          #qdc-usage .qdc-days { display: flex; align-items: flex-end; gap: 2px; height: 54px; padding-top: 4px; }
+          #qdc-usage .qdc-day { flex: 1 1 0; min-width: 3px; background: var(--accent); opacity: .55; border-radius: 2px 2px 0 0; }
+          #qdc-usage .qdc-day:hover { opacity: 1; }
+          #qdc-usage .qdc-day.zero { background: var(--line-2); opacity: 1; height: 2px !important; }
+          #qdc-usage .qdc-days-head { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--faint); margin-top: 4px; }
+          #qdc-usage .qdc-acc { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-3); }
+          #qdc-usage .qdc-acc:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+          #qdc-usage .qdc-acc-name { font-size: 12px; color: var(--fg-2); margin-bottom: 8px; }
           .qdc-act { display: inline-flex; align-items: center; height: 20px; padding: 0 10px; margin-left: 4px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--fg-2); font-size: 11px; line-height: 1; white-space: nowrap; cursor: pointer; }
           .qdc-act:hover { background: var(--pill-hover); border-color: var(--accent-line); color: var(--fg); }
           .qdc-act.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 32%, transparent); background: var(--err-soft); }
@@ -389,6 +479,101 @@ export default {
           if (d.error) { st.textContent = d.error; if (d.expired) { clearInterval(timer); timer = null; } return; }
           st.textContent = "等待登录完成… " + (d.detail || "");
         }
+        // ── 积分 / 消耗：额度、加油包、重置时间、累计与逐日消耗 ────────
+        function fmtDate(ts) {
+          if (!ts) return "—";
+          var d = new Date(Number(ts));
+          return isNaN(d.getTime()) ? "—" : d.toLocaleDateString("zh-CN");
+        }
+        function planName(t) {
+          var map = {
+            personal_professional_trial: "专业版（试用）",
+            personal_professional: "专业版",
+            personal_free: "免费版",
+            personal_pro: "Pro",
+            personal_team: "团队版",
+          };
+          if (map[t]) return map[t];
+          if (!t) return "—";
+          return String(t).replace(/^personal_/, "").replace(/_/g, " ");
+        }
+        function kpiBox(n, unit, label) {
+          return '<div class="qdc-kpi"><div class="n">' + esc(n) + (unit ? "<small>" + esc(unit) + "</small>" : "") +
+            '</div><div class="l">' + esc(label) + "</div></div>";
+        }
+        function renderUsage(d) {
+          var el = byId("qdc-usage");
+          var at = byId("qdc-usage-at");
+          if (!el) return;
+          if (!d || !d.ok) {
+            if (at) at.textContent = "";
+            el.innerHTML = '<div class="empty">' + esc((d && d.error) || "额度不可达") + '</div>';
+            return;
+          }
+          if (at) at.textContent = d.at ? new Date(d.at).toLocaleTimeString("zh-CN", { hour12: false }) : "";
+          var accs = (d.accounts || []).filter(function (a) { return a.ok; });
+          var bad = (d.accounts || []).filter(function (a) { return !a.ok; });
+          if (!accs.length) {
+            el.innerHTML = '<div class="empty">' + esc((bad[0] && bad[0].error) || "没有可用账号") + '</div>';
+            return;
+          }
+          var html = "";
+          accs.forEach(function (a, ai) {
+            var q = a.quota || {};
+            var pct = Math.max(0, Math.min(100, Math.round((q.percentage || 0) * 100)));
+            // 消耗口径统一用热量图（官方 credits-summary 只统计窗口内的会话，常与配额对不上）
+            var days = (a.daily || []).slice(-30);
+            var maxDay = 0, sumDays = 0, peakDate = "";
+            days.forEach(function (x) {
+              sumDays += x.value;
+              if (x.value > maxDay) { maxDay = x.value; peakDate = x.date; }
+            });
+            var cls = pct >= 95 ? "err" : pct >= 80 ? "warn" : "";
+            html += '<div class="qdc-acc">';
+            if (accs.length > 1 || a.nickname) {
+              html += '<div class="qdc-acc-name">' + esc(a.nickname || a.uid.slice(0, 8)) +
+                ' <span class="k">' + esc(planName(a.userType)) + (a.exceeded ? " · 已超额" : "") + '</span></div>';
+            }
+            html += '<div class="qdc-kpis">' +
+              kpiBox(q.remaining, q.unit || "credits", "剩余额度") +
+              kpiBox(q.used, "/ " + (q.total || "—"), "已用") +
+              (a.addOn ? kpiBox(a.addOn.remaining, "credits", "加油包剩余") : "") +
+              kpiBox(sumDays, "credits", "近 " + days.length + " 天消耗") +
+              "</div>";
+            html += '<div class="qdc-bar ' + cls + '"><i style="width:' + pct + '%"></i></div>';
+            var meta = [];
+            meta.push("用量 " + pct + "%");
+            if (a.refreshAt) meta.push("额度重置 " + fmtDate(a.refreshAt));
+            if (a.expiresAt) meta.push("套餐到期 " + fmtDate(a.expiresAt));
+            if (maxDay > 0) meta.push("单日峰值 " + maxDay + "（" + peakDate + "）");
+            html += '<div class="qdc-meta">' + meta.map(function (m) { return "<span>" + esc(m) + "</span>"; }).join("") + "</div>";
+
+            var max = maxDay;
+            if (days.length) {
+              html += '<div class="qdc-days">';
+              days.forEach(function (x) {
+                var h = max > 0 && x.value > 0 ? Math.max(3, Math.round((x.value / max) * 50)) : 0;
+                html += x.value > 0
+                  ? '<div class="qdc-day" style="height:' + h + 'px" title="' + esc(x.date) + "：" + x.value + ' credits"></div>'
+                  : '<div class="qdc-day zero" title="' + esc(x.date) + '：0 credits"></div>';
+              });
+              html += "</div>";
+              html += '<div class="qdc-days-head"><span>' + esc(days[0].date) + "</span><span>近 " + days.length + " 天消耗（峰值 " + max + "）</span><span>" + esc(days[days.length - 1].date) + "</span></div>";
+            }
+            html += "</div>";
+          });
+          if (bad.length) {
+            html += '<div class="hint">' + esc(bad.map(function (b) { return (b.nickname || b.uid.slice(0, 8)) + "：" + b.error; }).join("；")) + "</div>";
+          }
+          el.innerHTML = html;
+        }
+        async function loadUsage() {
+          var el = byId("qdc-usage");
+          if (el) el.innerHTML = '<div class="empty">额度读取中…</div>';
+          renderUsage(await api("/usage"));
+        }
+        byId("qdc-usage-refresh").onclick = loadUsage;
+
         // ── 模型目录：倍率 / 上下文 / 能力，点行展开 ──────────────────
         function fmtCtx(n) {
           n = Number(n) || 0;
@@ -475,6 +660,7 @@ export default {
         byId("qdc-refresh").onclick = load;
         load();
         loadModels();
+        loadUsage();
       })();
       </script>
     `);
