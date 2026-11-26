@@ -1846,6 +1846,26 @@ function enrichTraeModelsList(payload) {
   return payload;
 }
 
+// /v1/models 的 qoder 补齐：边车只给 context_length，客户端读的别名一律补上。
+function enrichQoderModelsList(payload) {
+  if (!Array.isArray(payload?.data)) return payload;
+  for (const model of payload.data) {
+    const ctx = Number(model.context_length) || Number(model.max_input_tokens) || 0;
+    if (ctx > 0) {
+      if (model.context_window === undefined) model.context_window = ctx;
+      if (model.contextWindow === undefined) model.contextWindow = ctx;
+      if (model.max_input_tokens === undefined) model.max_input_tokens = ctx;
+    }
+    const maxOut = Number(model.max_output_tokens) || Number(model.max_tokens) || 32000;
+    if (model.max_tokens === undefined) model.max_tokens = maxOut;
+    if (model.max_output_tokens === undefined) model.max_output_tokens = maxOut;
+    if (model.top_provider === undefined) {
+      model.top_provider = { context_length: ctx, max_completion_tokens: maxOut };
+    }
+  }
+  return payload;
+}
+
 // GET /v1/models：拉上游列表，trae 上游补齐元数据后下发。原先是原样透传，
 // 客户端只能拿到 context_length，最大输出数一概没有。
 /**
@@ -1892,6 +1912,7 @@ async function handleModelsListAll(req, res, requestId) {
         continue;
       }
       if (upstream.kind === "trae") enrichTraeModelsList(payload);
+      else if (upstream.id === "qoder") enrichQoderModelsList(payload);
       for (const item of payload.data) {
         const id = String(item?.id ?? "");
         if (!id) continue;

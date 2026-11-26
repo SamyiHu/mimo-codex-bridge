@@ -82,19 +82,41 @@ function loadCatalog() {
     const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.models) ? raw.models : []);
     const out = list
       .filter((m) => m && m.key && m.enable !== false)
-      .map((m) => ({
-        key: String(m.key),
-        name: String(m.display_name || m.key),
-        source: String(m.source || "system"),
-        isReasoning: Boolean(m.is_reasoning),
-        isVl: Boolean(m.is_vl),
-        maxInput: Number(m.max_input_tokens) || 0,
-        free: Boolean(m.is_free),
-        priceFactor: Number(m.price_factor) || 0,
-      }));
+      .map((m) => {
+        const tiers = Array.isArray(m.context_tiers)
+          ? m.context_tiers.filter((t) => Number(t.tokens) > 0)
+          : [];
+        const maxTier = tiers.reduce((mx, t) => Math.max(mx, Number(t.tokens) || 0), 0);
+        const maxInput = Number(m.max_input_tokens) || 0;
+        return {
+          key: String(m.key),
+          name: String(m.display_name || m.key),
+          source: String(m.source || "system"),
+          isReasoning: Boolean(m.is_reasoning),
+          isVl: Boolean(m.is_vl),
+          maxInput,
+          maxContext: Math.max(maxTier, maxInput),
+          contextTiers: tiers,
+          free: Boolean(m.is_free),
+          priceFactor: Number(m.price_factor) || 0,
+        };
+      });
     if (out.length) return out;
   } catch { /* 回落到默认 */ }
   return DEFAULT_MODELS.map((m) => ({ ...m, source: "system" }));
+}
+
+/** 官方目录的 context_config（200K/400K/1M 多档）→ [{label,tokens,isDefault}] */
+function normalizeContextTiers(model) {
+  const cfg = model && model.context_config;
+  if (!cfg || typeof cfg !== "object") return [];
+  return Object.keys(cfg)
+    .map((label) => {
+      const item = cfg[label] || {};
+      return { label: String(label), tokens: Number(item.token_count) || 0, isDefault: item.is_default === true };
+    })
+    .filter((t) => t.tokens > 0)
+    .sort((a, b) => a.tokens - b.tokens);
 }
 
 /**
@@ -132,6 +154,7 @@ async function refreshCatalog({ force = false, account = null } = {}) {
         is_reasoning: Boolean(m.is_reasoning),
         is_vl: Boolean(m.is_vl),
         max_input_tokens: Number(m.max_input_tokens) || 0,
+        context_tiers: normalizeContextTiers(m),
         ...(m.is_free === true ? { is_free: true } : {}),
         price_factor: Number(m.price_factor) || 0,
       }));
@@ -398,18 +421,29 @@ const server = http.createServer((req, res) => {
       .catch((e) => sendJson(res, 500, { ok: false, error: String(e.message || e) }));
   }
   if (url.pathname === "/v1/models") {
-    const data = loadCatalog().map((m) => ({
-      id: m.name,
-      object: "model",
-      created: 0,
-      owned_by: "qoder",
-      qoder_key: m.key,
-      context_length: m.maxInput || undefined,
-      is_free: m.free || undefined,
-      price_factor: m.priceFactor || undefined,
-      supports_images: m.isVl || undefined,
-      supports_reasoning: m.isReasoning || undefined,
-    }));
+    const data = loadCatalog().map((m) => {
+      const ctx = m.maxContext || m.maxInput || 0;
+      const maxOut = 32000;
+      return {
+        id: m.name,
+        object: "model",
+        created: 0,
+        owned_by: "qoder",
+        qoder_key: m.key,
+        context_length: ctx || undefined,
+        context_window: ctx || undefined,
+        contextWindow: ctx || undefined,
+        max_input_tokens: ctx || undefined,
+        max_tokens: maxOut,
+        max_output_tokens: maxOut,
+        context_tiers: m.contextTiers && m.contextTiers.length ? m.contextTiers : undefined,
+        top_provider: { context_length: ctx || undefined, max_completion_tokens: maxOut },
+        is_free: m.free || undefined,
+        price_factor: m.priceFactor || undefined,
+        supports_images: m.isVl || undefined,
+        supports_reasoning: m.isReasoning || undefined,
+      };
+    });
     return sendJson(res, 200, { object: "list", data });
   }
   if (url.pathname === "/v1/chat/completions") {

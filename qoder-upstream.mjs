@@ -176,7 +176,10 @@ export function translateEnvelopeLine(line) {
     try { inner = JSON.parse(inner); } catch { /* 内层可能已是文本 */ }
   }
   if (inner == null) return { lines: [] };
-  if (typeof inner === "string") return { lines: ["data: " + JSON.stringify({ choices: [{ delta: { content: inner } }] })] };
+  if (typeof inner === "string") {
+    if (inner.trim() === "[DONE]") return { lines: ["data: [DONE]"] };
+    return { lines: ["data: " + JSON.stringify({ choices: [{ delta: { content: inner } }] })] };
+  }
   return { lines: ["data: " + JSON.stringify(inner)] };
 }
 
